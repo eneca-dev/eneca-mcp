@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.4.0",
     "accepts": "^1.3.8",
     "ajv": "^6.12.6",
     "array-flatten": "^1.1.1",
@@ -113,7 +114,7 @@
   "keywords": ["mcp", "n8n", "eneca", "heroku"],
   "author": "eneca-dev",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "engines": {
     "node": "18.x"
   }
