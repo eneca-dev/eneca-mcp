@@ -5,7 +5,6 @@ yarn-debug.log*
 yarn-error.log*
 
 # Сборка
-build/
 dist/
 .next/
 out/
