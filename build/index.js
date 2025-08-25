@@ -55,14 +55,34 @@ if (transport === 'sse') {
                     // Сохраняем транспорт для POST запросов
                     activeTransports.set(sessionId, sseTransport);
                     console.log(`Транспорт сохранен: ${sessionId}`);
-                    // Cleanup при закрытии
-                    sseTransport.onclose = () => {
-                        console.log(`SSE соединение закрыто: ${sessionId}`);
-                        activeTransports.delete(sessionId);
-                    };
+                    // Cleanup при закрытии уже обрабатывается в onclose выше
                     // Подключаем MCP сервер к транспорту
                     await server.connect(sseTransport);
                     console.log('SSE соединение установлено');
+                    
+                    // Устанавливаем keep-alive ping каждые 30 секунд для предотвращения таймаутов Heroku
+                    const keepAliveInterval = setInterval(() => {
+                        if (res.writableEnded || res.destroyed) {
+                            clearInterval(keepAliveInterval);
+                            return;
+                        }
+                        
+                        try {
+                            // Отправляем комментарий каждые 30 секунд для поддержания соединения
+                            res.write(`: keepalive ${Date.now()}\n\n`);
+                            console.log('💓 Keep-alive ping отправлен');
+                        } catch (error) {
+                            console.log('❌ Ошибка keep-alive ping:', error.message);
+                            clearInterval(keepAliveInterval);
+                        }
+                    }, 30000); // 30 секунд
+                    
+                    // Очищаем интервал при закрытии соединения
+                    sseTransport.onclose = () => {
+                        console.log(`SSE соединение закрыто: ${sessionId}`);
+                        clearInterval(keepAliveInterval);
+                        activeTransports.delete(sessionId);
+                    };
                 }
                 catch (error) {
                     console.error('Ошибка GET /sse:', error);
