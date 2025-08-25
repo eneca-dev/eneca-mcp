@@ -106,10 +106,15 @@
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js --transport=sse"
+    "start": "node build/index.js --transport=sse",
+    "dev": "node build/index.js --transport=sse",
+    "heroku-postbuild": "echo 'Build completed'"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": ["mcp", "n8n", "eneca", "heroku"],
+  "author": "eneca-dev",
   "license": "ISC",
-  "type": "commonjs"
+  "type": "commonjs",
+  "engines": {
+    "node": "18.x"
+  }
 }

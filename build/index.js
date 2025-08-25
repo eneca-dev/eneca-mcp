@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { createMcpServer } from './mcp-server.js';
-console.log('Запуск Eneca MCP Server для n8n...');
+console.log('🚀 Запуск Eneca MCP Server для n8n...');
+console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+console.log(`🔧 Platform: ${process.platform}`);
+console.log(`📦 Node.js: ${process.version}`);
 // Rate Limiting - 1000 запросов в минуту на сессию
 const rateLimiter = new Map();
 function checkRateLimit(sessionId) {
@@ -108,15 +111,36 @@ if (transport === 'sse') {
                 }
                 return;
             }
+            // Health check для Heroku
+            if (req.method === 'GET' && url.pathname === '/') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    status: 'ok',
+                    service: 'eneca-mcp-server',
+                    version: '2.0.0',
+                    timestamp: new Date().toISOString(),
+                    endpoints: {
+                        sse: '/sse',
+                        health: '/'
+                    }
+                }));
+                return;
+            }
+            
             // 404 для всех остальных запросов
             console.log(`404: ${req.method} ${url.pathname}${url.search}`);
             res.writeHead(404);
             res.end('Not Found');
         });
+        // Получаем порт из переменных окружения (Heroku)
+        const port = process.env.PORT || 8080;
+        
         // Запускаем сервер
-        httpServer.listen(8080);
-        console.log('SSE сервер запущен на порту 8080');
-        console.log('Endpoint: http://localhost:8080/sse');
+        httpServer.listen(port, () => {
+            console.log(`🚀 SSE сервер запущен на порту ${port}`);
+            console.log(`📍 Endpoint: http://localhost:${port}/sse`);
+            console.log(`🌐 Heroku URL: https://${process.env.HEROKU_APP_NAME || 'your-app'}.herokuapp.com/sse`);
+        });
         console.log('Готов for n8n MCP Client');
         console.log('Полная поддержка GET и POST запросов');
         // Graceful shutdown
