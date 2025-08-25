@@ -141,9 +141,81 @@ if (transport === 'sse') {
                     timestamp: new Date().toISOString(),
                     endpoints: {
                         sse: '/sse',
-                        health: '/'
+                        health: '/',
+                        webhook: '/webhook'
                     }
                 }));
+                return;
+            }
+            
+            // Webhook endpoint для n8n
+            if (req.method === 'POST' && url.pathname === '/webhook') {
+                console.log('📡 POST /webhook - Вебхук от n8n');
+                
+                try {
+                    let body = '';
+                    req.on('data', chunk => {
+                        body += chunk.toString();
+                    });
+                    
+                    req.on('end', async () => {
+                        try {
+                            const webhookData = JSON.parse(body);
+                            console.log('📥 Получены данные вебхука:', JSON.stringify(webhookData, null, 2));
+                            
+                            // Отправляем уведомление через SSE всем активным клиентам
+                            const webhookMessage = {
+                                type: 'webhook',
+                                timestamp: new Date().toISOString(),
+                                data: webhookData,
+                                source: 'n8n'
+                            };
+                            
+                            let clientsNotified = 0;
+                            for (const [sessionId, transport] of activeTransports) {
+                                try {
+                                    // Отправляем через SSE
+                                    transport.sendMessage({
+                                        type: 'webhook',
+                                        data: webhookMessage
+                                    });
+                                    clientsNotified++;
+                                    console.log(`📤 Вебхук отправлен клиенту: ${sessionId}`);
+                                } catch (error) {
+                                    console.log(`❌ Ошибка отправки вебхука клиенту ${sessionId}:`, error.message);
+                                }
+                            }
+                            
+                            // Отправляем ответ
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({
+                                status: 'success',
+                                message: 'Webhook получен и обработан',
+                                clientsNotified,
+                                timestamp: new Date().toISOString(),
+                                data: webhookData
+                            }));
+                            
+                            console.log(`✅ Вебхук обработан успешно. Уведомлено клиентов: ${clientsNotified}`);
+                            
+                        } catch (parseError) {
+                            console.error('❌ Ошибка парсинга JSON вебхука:', parseError);
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ 
+                                error: 'Invalid JSON', 
+                                message: parseError.message 
+                            }));
+                        }
+                    });
+                    
+                } catch (error) {
+                    console.error('❌ Ошибка обработки вебхука:', error);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ 
+                        error: 'Internal Server Error', 
+                        message: error.message 
+                    }));
+                }
                 return;
             }
             
