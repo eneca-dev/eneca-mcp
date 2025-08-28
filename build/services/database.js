@@ -4,6 +4,40 @@
  */
 import { supabase } from '../config/supabase.js';
 export class DatabaseService {
+    // Простое кэширование
+    constructor() {
+        this.cache = {
+            users: new Map(),
+            projects: new Map(),
+            stages: new Map(),
+            objects: new Map()
+        };
+        this.cacheTimestamps = {
+            users: 0,
+            projects: 0,
+            stages: 0,
+            objects: 0
+        };
+        this.cacheTimeout = 60 * 60 * 1000; // 1 час
+    }
+
+    // Проверка актуальности кэша
+    isCacheValid(cacheType) {
+        return Date.now() - this.cacheTimestamps[cacheType] < this.cacheTimeout;
+    }
+
+    // Очистка кэша
+    clearCache(cacheType = null) {
+        if (cacheType) {
+            this.cache[cacheType].clear();
+            this.cacheTimestamps[cacheType] = 0;
+        } else {
+            Object.keys(this.cache).forEach(key => {
+                this.cache[key].clear();
+                this.cacheTimestamps[key] = 0;
+            });
+        }
+    }
     // ===== МЕТОДЫ ВАЛИДАЦИИ =====
     async validateProjectExists(projectId) {
         const { data, error } = await supabase
@@ -153,6 +187,12 @@ export class DatabaseService {
     }
     async getProject(projectId) {
         try {
+            // Проверяем кэш
+            if (this.cache.projects.has(projectId) && this.isCacheValid('projects')) {
+                const cachedData = this.cache.projects.get(projectId);
+                return { success: true, message: 'Проект найден (из кэша)', data: cachedData };
+            }
+
             const { data, error } = await supabase
                 .from('projects')
                 .select('*')
@@ -161,6 +201,11 @@ export class DatabaseService {
             if (error) {
                 return { success: false, message: `Проект не найден: ${error.message}`, error: error.message };
             }
+            
+            // Сохраняем в кэш
+            this.cache.projects.set(projectId, data);
+            this.cacheTimestamps.projects = Date.now();
+            
             return { success: true, message: 'Проект найден', data };
         }
         catch (error) {
@@ -960,5 +1005,283 @@ export class DatabaseService {
             .eq('section_id', sectionId)
             .single();
         return !error && !!data;
+    }
+
+    // ===== НОВЫЕ МЕТОДЫ ДЛЯ ГЛОБАЛЬНОГО ПОИСКА =====
+    
+    /**
+     * Получить проекты по менеджеру
+     */
+    async getProjectsByManager(managerId) {
+        const { data, error } = await supabase
+            .from('projects')
+            .select('*')
+            .eq('project_manager', managerId);
+        return error ? [] : data || [];
+    }
+
+    /**
+     * Получить проекты по главному инженеру
+     */
+    async getProjectsByLeadEngineer(leadEngineerId) {
+        const { data, error } = await supabase
+            .from('projects')
+            .select('*')
+            .eq('project_lead_engineer', leadEngineerId);
+        return error ? [] : data || [];
+    }
+
+    /**
+     * Получить объекты по ответственному
+     */
+    async getObjectsByResponsible(responsibleId, projectName = null, limit = 20) {
+        let query = supabase
+            .from('objects')
+            .select(`
+                *,
+                projects!inner(project_name),
+                stages!inner(stage_name)
+            `)
+            .eq('object_responsible', responsibleId)
+            .limit(limit);
+
+        if (projectName) {
+            query = query.ilike('projects.project_name', `%${projectName}%`);
+        }
+
+        const { data, error } = await query;
+        if (error) return [];
+
+        return data.map(obj => ({
+            ...obj,
+            project_name: obj.projects?.project_name,
+            stage_name: obj.stages?.stage_name
+        }));
+    }
+
+    /**
+     * Получить разделы по ответственному
+     */
+    async getSectionsByResponsible(responsibleId, projectName = null, limit = 20) {
+        let query = supabase
+            .from('sections')
+            .select(`
+                *,
+                projects!inner(project_name),
+                objects!inner(object_name)
+            `)
+            .eq('section_responsible', responsibleId)
+            .limit(limit);
+
+        if (projectName) {
+            query = query.ilike('projects.project_name', `%${projectName}%`);
+        }
+
+        const { data, error } = await query;
+        if (error) return [];
+
+        return data.map(section => ({
+            ...section,
+            project_name: section.projects?.project_name,
+            object_name: section.objects?.object_name
+        }));
+    }
+
+    /**
+     * Получить команду проекта
+     */
+    async getProjectTeam(projectId) {
+        // Получаем менеджера и главного инженера
+        const { data: project, error: projectError } = await supabase
+            .from('projects')
+            .select(`
+                project_manager,
+                project_lead_engineer,
+                profiles_manager:project_manager(user_id, first_name, last_name, full_name, email, position_name, department_name),
+                profiles_lead:project_lead_engineer(user_id, first_name, last_name, full_name, email, position_name, department_name)
+            `)
+            .eq('project_id', projectId)
+            .single();
+
+        if (projectError || !project) return [];
+
+        const teamMembers = [];
+
+        // Добавляем менеджера
+        if (project.profiles_manager) {
+            teamMembers.push({
+                ...project.profiles_manager,
+                role: 'manager'
+            });
+        }
+
+        // Добавляем главного инженера
+        if (project.profiles_lead) {
+            teamMembers.push({
+                ...project.profiles_lead,
+                role: 'lead_engineer'
+            });
+        }
+
+        // Получаем всех ответственных по объектам и разделам
+        const { data: responsibles, error: responsiblesError } = await supabase
+            .from('view_project_responsibles')
+            .select('*')
+            .eq('project_id', projectId);
+
+        if (!responsiblesError && responsibles) {
+            responsibles.forEach(responsible => {
+                teamMembers.push({
+                    ...responsible,
+                    role: 'responsible'
+                });
+            });
+        }
+
+        return teamMembers;
+    }
+
+    /**
+     * Получить детальную загрузку сотрудника
+     */
+    async getEmployeeDetailedWorkload(userId, projectName = null, includeCompleted = false) {
+        try {
+            // Получаем все разделы сотрудника с детальной информацией
+            let query = supabase
+                .from('view_sections_with_loadings')
+                .select(`
+                    *,
+                    projects!inner(project_name, project_status),
+                    objects!inner(object_name)
+                `)
+                .or(`section_responsible_id.eq.${userId},loading_responsible.eq.${userId}`);
+
+            if (projectName) {
+                query = query.ilike('projects.project_name', `%${projectName}%`);
+            }
+
+            if (!includeCompleted) {
+                // Исключаем завершенные задачи (можно добавить фильтр по дате окончания)
+                query = query.is('section_end_date', null);
+            }
+
+            const { data, error } = await query.limit(100);
+
+            if (error) {
+                console.error('Ошибка получения загрузки сотрудника:', error);
+                return { projects: [] };
+            }
+
+            // Группируем по проектам
+            const projectGroups = {};
+            
+            (data || []).forEach(item => {
+                const projectName = item.projects?.project_name || 'Неизвестный проект';
+                if (!projectGroups[projectName]) {
+                    projectGroups[projectName] = {
+                        project_name: projectName,
+                        project_status: item.projects?.project_status || 'active',
+                        sections: []
+                    };
+                }
+                
+                projectGroups[projectName].sections.push({
+                    section_name: item.section_name,
+                    section_type: item.section_type,
+                    object_name: item.objects?.object_name,
+                    loading_rate: item.loading_rate,
+                    section_start_date: item.section_start_date,
+                    section_end_date: item.section_end_date,
+                    section_description: item.section_description
+                });
+            });
+
+            return {
+                projects: Object.values(projectGroups)
+            };
+        } catch (error) {
+            console.error('Ошибка получения детальной загрузки:', error);
+            return { projects: [] };
+        }
+    }
+
+    /**
+     * Получить стадию по ID (с кэшированием)
+     */
+    async getStage(stageId) {
+        try {
+            // Проверяем кэш
+            if (this.cache.stages.has(stageId) && this.isCacheValid('stages')) {
+                const cachedData = this.cache.stages.get(stageId);
+                return { success: true, message: 'Стадия найдена (из кэша)', data: cachedData };
+            }
+
+            const { data, error } = await supabase
+                .from('stages')
+                .select('*')
+                .eq('stage_id', stageId)
+                .single();
+            if (error) {
+                return { success: false, message: `Стадия не найдена: ${error.message}`, error: error.message };
+            }
+            
+            // Сохраняем в кэш
+            this.cache.stages.set(stageId, data);
+            this.cacheTimestamps.stages = Date.now();
+            
+            return { success: true, message: 'Стадия найдена', data };
+        } catch (error) {
+            return { success: false, message: `Неожиданная ошибка: ${error}`, error: String(error) };
+        }
+    }
+
+    /**
+     * Получить пользователя по ID (с кэшированием)
+     */
+    async getUser(userId) {
+        try {
+            // Проверяем кэш
+            if (this.cache.users.has(userId) && this.isCacheValid('users')) {
+                return this.cache.users.get(userId);
+            }
+
+            const { data, error } = await supabase
+                .from('view_users')
+                .select('*')
+                .eq('user_id', userId)
+                .eq('is_active', true)
+                .single();
+            
+            const result = error ? null : data;
+            
+            // Сохраняем в кэш
+            if (result) {
+                this.cache.users.set(userId, result);
+                this.cacheTimestamps.users = Date.now();
+            }
+            
+            return result;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    /**
+     * Получить объект по ID
+     */
+    async getObject(objectId) {
+        try {
+            const { data, error } = await supabase
+                .from('objects')
+                .select('*')
+                .eq('object_id', objectId)
+                .single();
+            if (error) {
+                return { success: false, message: `Объект не найден: ${error.message}`, error: error.message };
+            }
+            return { success: true, message: 'Объект найден', data };
+        } catch (error) {
+            return { success: false, message: `Неожиданная ошибка: ${error}`, error: String(error) };
+        }
     }
 }

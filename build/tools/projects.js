@@ -354,6 +354,11 @@ export const getProjectDetailsTool = {
             project_name: {
                 type: "string",
                 description: "Название проекта или его часть для поиска"
+            },
+            include_structure: {
+                type: "boolean",
+                description: "Включать полную структуру проекта (стадии, объекты, разделы)",
+                default: false
             }
         },
         required: ["project_name"]
@@ -386,9 +391,12 @@ export async function handleGetProjectDetails(args) {
         }
         // Если найден один проект, показываем детали
         const project = projects[0];
+        const includeStructure = args.include_structure || false;
+        
         // Получаем дополнительную информацию
         const stagesResult = await dbService.listStages({ project_id: project.project_id });
         const stages = stagesResult.success ? stagesResult.data : [];
+        
         let detailsText = `**ПРОЕКТ: ${project.project_name}**\n\n`;
         detailsText += `**Основная информация:**\n`;
         detailsText += `• Статус: ${dbService.getDisplayStatus(project.project_status || 'active')}\n`;
@@ -399,6 +407,7 @@ export async function handleGetProjectDetails(args) {
         }
         detailsText += `\n**Структура:**\n`;
         detailsText += `• Стадий: ${stages?.length || 0}\n`;
+        
         if (stages && stages.length > 0) {
             detailsText += `\n**Стадии:**\n`;
             stages.forEach((stage, index) => {
@@ -407,6 +416,45 @@ export async function handleGetProjectDetails(args) {
                     detailsText += `   Описание: ${stage.stage_description}\n`;
                 }
             });
+        }
+
+        // Если запрошена полная структура
+        if (includeStructure && stages && stages.length > 0) {
+            detailsText += `\n**Полная структура проекта:**\n`;
+            
+            for (let i = 0; i < stages.length; i++) {
+                const stage = stages[i];
+                detailsText += `\n**${i + 1}. ${stage.stage_name}**\n`;
+                if (stage.stage_description) {
+                    detailsText += `   Описание: ${stage.stage_description}\n`;
+                }
+                
+                // Получаем объекты стадии
+                const objectsResult = await dbService.searchObjectsByName('', stage.stage_id);
+                if (objectsResult.length === 0) {
+                    detailsText += `   Объектов пока нет\n`;
+                    continue;
+                }
+                
+                detailsText += `   Объектов: ${objectsResult.length}\n`;
+                
+                // Выводим первые 3 объекта
+                const objectsToShow = objectsResult.slice(0, 3);
+                for (const obj of objectsToShow) {
+                    detailsText += `   • ${obj.object_name}\n`;
+                    
+                    // Получаем разделы объекта
+                    const sectionsResult = await dbService.listSections({ object_id: obj.object_id });
+                    const sections = sectionsResult.success ? sectionsResult.data || [] : [];
+                    if (sections.length > 0) {
+                        detailsText += `     Разделов: ${sections.length}\n`;
+                    }
+                }
+                
+                if (objectsResult.length > 3) {
+                    detailsText += `   ... и еще ${objectsResult.length - 3} объектов\n`;
+                }
+            }
         }
         return {
             content: [{

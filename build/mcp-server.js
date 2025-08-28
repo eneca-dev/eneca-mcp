@@ -10,7 +10,8 @@ import { projectTools, projectHandlers } from './tools/projects.js';
 import { stageTools, stageHandlers } from './tools/stages.js';
 import { objectTools, objectHandlers } from './tools/objects.js';
 import { sectionTools, sectionHandlers } from './tools/sections.js';
-// Пока не используем ресурсы и промпты
+// Импорт глобальных инструментов поиска
+import { globalSearchTools, globalSearchHandlers } from './tools/global-search.js';
 // Создаем экземпляр сервиса базы данных
 const dbService = new DatabaseService();
 export function createMcpServer() {
@@ -38,14 +39,16 @@ export function createMcpServer() {
         ...projectTools,
         ...stageTools,
         ...objectTools,
-        ...sectionTools
+        ...sectionTools,
+        ...globalSearchTools
     ];
     // Объединение всех обработчиков
     const allHandlers = {
         ...projectHandlers,
         ...stageHandlers,
         ...objectHandlers,
-        ...sectionHandlers
+        ...sectionHandlers,
+        ...globalSearchHandlers
     };
     console.log(`📦 Загружено инструментов: ${allTools.length}`);
     console.log(`🔧 Загружено обработчиков: ${Object.keys(allHandlers).length}`);

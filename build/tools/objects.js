@@ -213,6 +213,11 @@ export const searchObjectsTool = {
                 type: "number",
                 description: "Лимит результатов",
                 default: 10
+            },
+            offset: {
+                type: "number",
+                description: "Смещение для пагинации",
+                default: 0
             }
         }
     }
@@ -282,7 +287,11 @@ export async function handleSearchObjects(args) {
         }
         else if (stageId) {
             // Получение всех объектов стадии
-            const result = await dbService.listObjects({ stage_id: stageId, limit: args.limit || 10 });
+            const result = await dbService.listObjects({ 
+                stage_id: stageId, 
+                limit: args.limit || 10,
+                offset: args.offset || 0
+            });
             if (!result.success) {
                 return {
                     content: [{
@@ -295,7 +304,11 @@ export async function handleSearchObjects(args) {
         }
         else if (projectId) {
             // Получение всех объектов проекта
-            const result = await dbService.listObjects({ project_id: projectId, limit: args.limit || 10 });
+            const result = await dbService.listObjects({ 
+                project_id: projectId, 
+                limit: args.limit || 10,
+                offset: args.offset || 0
+            });
             if (!result.success) {
                 return {
                     content: [{
@@ -350,30 +363,31 @@ export async function handleSearchObjects(args) {
             let projectName = 'Неизвестно';
             let stageName = 'Неизвестно';
             let responsibleName = 'Не назначен';
+            
             // Получаем название проекта
             if (obj.object_project_id) {
-                const { data: projectData } = await dbService.listProjects({});
-                const foundProject = projectData?.find((proj) => proj.project_id === obj.object_project_id);
-                if (foundProject) {
-                    projectName = foundProject.project_name;
+                const project = await dbService.getProject(obj.object_project_id);
+                if (project.success) {
+                    projectName = project.data.project_name;
                 }
             }
+            
             // Получаем название стадии
             if (obj.object_stage_id) {
-                const { data: stageData } = await dbService.listStages({ project_id: obj.object_project_id });
-                const foundStage = stageData?.find((stage) => stage.stage_id === obj.object_stage_id);
-                if (foundStage) {
-                    stageName = foundStage.stage_name;
+                const stage = await dbService.getStage(obj.object_stage_id);
+                if (stage.success) {
+                    stageName = stage.data.stage_name;
                 }
             }
+            
             // Получаем имя ответственного
             if (obj.object_responsible) {
-                const users = await dbService.searchUsersByQuery('');
-                const foundUser = users.find((user) => user.user_id === obj.object_responsible);
-                if (foundUser) {
-                    responsibleName = foundUser.full_name.trim() || `${foundUser.first_name} ${foundUser.last_name}`.trim();
+                const user = await dbService.getUser(obj.object_responsible);
+                if (user) {
+                    responsibleName = user.full_name?.trim() || `${user.first_name} ${user.last_name}`.trim();
                 }
             }
+            
             return { ...obj, projectName, stageName, responsibleName };
         }));
         const objectsText = objectsWithNames.map((obj, index) => {
@@ -393,10 +407,27 @@ export async function handleSearchObjects(args) {
             }
             return text;
         }).join('\n');
+        const limit = args.limit || 10;
+        const offset = args.offset || 0;
+        const hasMore = objects.length === limit;
+        
+        let resultText = `Найдено объектов: ${objects.length}`;
+        if (hasMore) {
+            resultText += ` (показано ${limit}, есть еще)`;
+        }
+        if (offset > 0) {
+            resultText += ` (смещение: ${offset})`;
+        }
+        resultText += `\n\n${objectsText}`;
+        
+        if (hasMore) {
+            resultText += `\n\n💡 Для получения следующих результатов используйте параметр offset: ${offset + limit}`;
+        }
+
         return {
             content: [{
                     type: "text",
-                    text: `Найдено объектов: ${objects.length}\n\n${objectsText}`
+                    text: resultText
                 }]
         };
     }

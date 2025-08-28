@@ -218,101 +218,7 @@ export async function handleSearchStages(args) {
         };
     }
 }
-// ===== ПОЛУЧЕНИЕ СТРУКТУРЫ ПРОЕКТА =====
-export const getProjectStructureTool = {
-    name: "get_project_structure",
-    description: "Получить полную структуру проекта со всеми стадиями, объектами и разделами",
-    inputSchema: {
-        type: "object",
-        properties: {
-            project_name: {
-                type: "string",
-                description: "Название проекта"
-            }
-        },
-        required: ["project_name"]
-    }
-};
-export async function handleGetProjectStructure(args) {
-    try {
-        const projectName = String(args.project_name).trim();
-        const projectResult = await dbService.validateUniqueProjectByName(projectName);
-        if (projectResult === 'not_found') {
-            return {
-                content: [{
-                        type: "text",
-                        text: `Проект с названием "${projectName}" не найден`
-                    }]
-            };
-        }
-        if (projectResult === 'multiple_found') {
-            return {
-                content: [{
-                        type: "text",
-                        text: `Найдено несколько проектов с названием "${projectName}". Используйте поиск проектов для выбора конкретного.`
-                    }]
-            };
-        }
-        const project = projectResult;
-        // Получаем стадии проекта
-        const stagesResult = await dbService.listStages({ project_id: project.project_id });
-        const stages = stagesResult.success ? stagesResult.data || [] : [];
-        let structureText = `**СТРУКТУРА ПРОЕКТА: ${project.project_name}**\n\n`;
-        if (stages.length === 0) {
-            structureText += "В проекте пока нет стадий\n";
-            return {
-                content: [{
-                        type: "text",
-                        text: structureText
-                    }]
-            };
-        }
-        // Для каждой стадии получаем объекты и разделы
-        for (let i = 0; i < stages.length; i++) {
-            const stage = stages[i];
-            structureText += `**${i + 1}. ${stage.stage_name}**\n`;
-            if (stage.stage_description) {
-                structureText += `   Описание: ${stage.stage_description}\n`;
-            }
-            // Получаем объекты стадии
-            const objectsResult = await dbService.searchObjectsByName('', stage.stage_id);
-            if (objectsResult.length === 0) {
-                structureText += `   Объектов пока нет\n\n`;
-                continue;
-            }
-            structureText += `   Объектов: ${objectsResult.length}\n`;
-            // Выводим первые 3 объекта
-            const objectsToShow = objectsResult.slice(0, 3);
-            for (const obj of objectsToShow) {
-                structureText += `   • ${obj.object_name}\n`;
-                // Получаем разделы объекта
-                const sectionsResult = await dbService.listSections({ object_id: obj.object_id });
-                const sections = sectionsResult.success ? sectionsResult.data || [] : [];
-                if (sections.length > 0) {
-                    structureText += `     Разделов: ${sections.length}\n`;
-                }
-            }
-            if (objectsResult.length > 3) {
-                structureText += `   ... и еще ${objectsResult.length - 3} объектов\n`;
-            }
-            structureText += `\n`;
-        }
-        return {
-            content: [{
-                    type: "text",
-                    text: structureText
-                }]
-        };
-    }
-    catch (error) {
-        return {
-            content: [{
-                    type: "text",
-                    text: `Ошибка получения структуры проекта: ${error}`
-                }]
-        };
-    }
-}
+// Удален getProjectStructureTool - функциональность перенесена в getProjectDetailsTool
 // ===== ОБНОВЛЕНИЕ СТАДИИ =====
 export const updateStageTool = {
     name: "update_stage",
@@ -424,12 +330,10 @@ export async function handleUpdateStage(args) {
 export const stageTools = [
     createStageTool,
     searchStagesTool,
-    getProjectStructureTool,
     updateStageTool
 ];
 export const stageHandlers = {
     create_stage: handleCreateStage,
     search_stages: handleSearchStages,
-    get_project_structure: handleGetProjectStructure,
     update_stage: handleUpdateStage
 };

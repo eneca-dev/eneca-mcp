@@ -178,6 +178,11 @@ export const searchSectionsTool = {
                 type: "number",
                 description: "Лимит результатов",
                 default: 10
+            },
+            offset: {
+                type: "number",
+                description: "Смещение для пагинации",
+                default: 0
             }
         }
     }
@@ -186,7 +191,8 @@ export async function handleSearchSections(args) {
     try {
         // Построение фильтров
         const filters = {
-            limit: args.limit || 10
+            limit: args.limit || 10,
+            offset: args.offset || 0
         };
         // Основной поиск по названию раздела (частичное совпадение)
         if (args.section_name) {
@@ -255,30 +261,31 @@ export async function handleSearchSections(args) {
             let objectName = 'Неизвестно';
             let projectName = 'Неизвестно';
             let responsibleName = 'Не назначен';
+            
             // Получаем название объекта
             if (section.section_object_id) {
-                const { data: objectData } = await dbService.listObjects({ project_id: section.section_project_id });
-                const foundObject = objectData?.find((obj) => obj.object_id === section.section_object_id);
-                if (foundObject) {
-                    objectName = foundObject.object_name;
+                const object = await dbService.getObject(section.section_object_id);
+                if (object.success) {
+                    objectName = object.data.object_name;
                 }
             }
+            
             // Получаем название проекта
             if (section.section_project_id) {
-                const { data: projectData } = await dbService.listProjects({});
-                const foundProject = projectData?.find((proj) => proj.project_id === section.section_project_id);
-                if (foundProject) {
-                    projectName = foundProject.project_name;
+                const project = await dbService.getProject(section.section_project_id);
+                if (project.success) {
+                    projectName = project.data.project_name;
                 }
             }
+            
             // Получаем имя ответственного
             if (section.section_responsible) {
-                const users = await dbService.searchUsersByQuery('');
-                const foundUser = users.find((user) => user.user_id === section.section_responsible);
-                if (foundUser) {
-                    responsibleName = foundUser.full_name.trim() || `${foundUser.first_name} ${foundUser.last_name}`.trim();
+                const user = await dbService.getUser(section.section_responsible);
+                if (user) {
+                    responsibleName = user.full_name?.trim() || `${user.first_name} ${user.last_name}`.trim();
                 }
             }
+            
             return { ...section, objectName, projectName, responsibleName };
         }));
         const sectionsText = sectionsWithNames.map((section, index) => {
@@ -301,10 +308,27 @@ export async function handleSearchSections(args) {
             }
             return text;
         }).join('\n');
+        const limit = args.limit || 10;
+        const offset = args.offset || 0;
+        const hasMore = sections.length === limit;
+        
+        let resultText = `Найдено разделов: ${sections.length}`;
+        if (hasMore) {
+            resultText += ` (показано ${limit}, есть еще)`;
+        }
+        if (offset > 0) {
+            resultText += ` (смещение: ${offset})`;
+        }
+        resultText += `\n\n${sectionsText}`;
+        
+        if (hasMore) {
+            resultText += `\n\n💡 Для получения следующих результатов используйте параметр offset: ${offset + limit}`;
+        }
+
         return {
             content: [{
                     type: "text",
-                    text: `Найдено разделов: ${sections.length}\n\n${sectionsText}`
+                    text: resultText
                 }]
         };
     }
@@ -317,102 +341,7 @@ export async function handleSearchSections(args) {
         };
     }
 }
-// ===== ПОИСК ПОЛЬЗОВАТЕЛЕЙ =====
-export const searchUsersTool = {
-    name: "search_users",
-    description: "Поиск пользователей по имени или email",
-    inputSchema: {
-        type: "object",
-        properties: {
-            query: {
-                type: "string",
-                description: "Поисковый запрос (имя, фамилия или email)"
-            },
-            limit: {
-                type: "number",
-                description: "Лимит результатов",
-                default: 10
-            }
-        },
-        required: ["query"]
-    }
-};
-export async function handleSearchUsers(args) {
-    try {
-        const query = String(args.query).trim();
-        const users = await dbService.searchUsersByQuery(query);
-        if (users.length === 0) {
-            return {
-                content: [{
-                        type: "text",
-                        text: `Пользователи не найдены по запросу "${query}"`
-                    }]
-            };
-        }
-        // Для каждого пользователя получаем его активные загрузки
-        const usersWithWorkloads = await Promise.all(users.map(async (user) => {
-            const workloads = await dbService.getUserActiveWorkloads(user.user_id);
-            return { ...user, workloads };
-        }));
-        const usersText = usersWithWorkloads.map((user, index) => {
-            let text = `${index + 1}. **${user.full_name.trim() || `${user.first_name} ${user.last_name}`.trim()}**\n`;
-            text += `   Email: ${user.email}\n`;
-            text += `   Должность: ${user.position_name || 'Не указана'}\n`;
-            text += `   Отдел: ${user.department_name || 'Не указан'}\n`;
-            text += `   Команда: ${user.team_name || 'Не указана'}\n`;
-            text += `   Категория: ${user.category_name || 'Не указана'}\n`;
-            text += `   Ставка: ${user.employment_rate || 'Не указана'}\n`;
-            if (user.work_format) {
-                text += `   Формат работы: ${user.work_format}\n`;
-            }
-            if (user.workloads && user.workloads.length > 0) {
-                text += `   **Активные проекты и разделы:**\n`;
-                // Группируем по проектам
-                const projectGroups = user.workloads.reduce((groups, workload) => {
-                    const projectName = workload.project_name || 'Неизвестный проект';
-                    if (!groups[projectName]) {
-                        groups[projectName] = [];
-                    }
-                    groups[projectName].push(workload);
-                    return groups;
-                }, {});
-                Object.entries(projectGroups).forEach(([projectName, workloads]) => {
-                    text += `     • **${projectName}**\n`;
-                    workloads.forEach((workload) => {
-                        if (workload.section_name) {
-                            text += `       - ${workload.section_name}`;
-                            if (workload.object_name) {
-                                text += ` (${workload.object_name})`;
-                            }
-                            if (workload.loading_rate && workload.loading_rate !== '0') {
-                                text += ` - загрузка: ${workload.loading_rate}%`;
-                            }
-                            text += `\n`;
-                        }
-                    });
-                });
-            }
-            else {
-                text += `   Активных проектов: нет\n`;
-            }
-            return text;
-        }).join('\n');
-        return {
-            content: [{
-                    type: "text",
-                    text: `Найдено пользователей: ${users.length}\n\n${usersText}`
-                }]
-        };
-    }
-    catch (error) {
-        return {
-            content: [{
-                    type: "text",
-                    text: `Ошибка поиска пользователей: ${error}`
-                }]
-        };
-    }
-}
+// search_users перенесен в global-search.js
 // ===== ОБНОВЛЕНИЕ РАЗДЕЛА =====
 export const updateSectionTool = {
     name: "update_section",
@@ -628,12 +557,10 @@ export async function handleUpdateSection(args) {
 export const sectionTools = [
     createSectionTool,
     searchSectionsTool,
-    searchUsersTool,
     updateSectionTool
 ];
 export const sectionHandlers = {
     create_section: handleCreateSection,
     search_sections: handleSearchSections,
-    search_users: handleSearchUsers,
     update_section: handleUpdateSection
 };
