@@ -46,6 +46,91 @@ if (transport === 'sse') {
             }
             // Парсим URL
             const url = new URL(req.url, `http://${req.headers.host}`);
+
+            // POST /mcp — Streamable HTTP совместимый JSON-RPC эндпоинт (fallback для n8n)
+            if (req.method === 'POST' && url.pathname === '/mcp') {
+                try {
+                    let body = '';
+                    req.on('data', chunk => { body += chunk.toString(); });
+                    req.on('end', async () => {
+                        try {
+                            const rpc = JSON.parse(body || '{}');
+                            const id = rpc.id ?? null;
+                            const method = rpc.method || '';
+                            const params = rpc.params || {};
+
+                            // Динамически собираем инструменты и обработчики так же, как в MCP-сервере
+                            const { projectTools, projectHandlers } = await import('./tools/projects.js');
+                            const { stageTools, stageHandlers } = await import('./tools/stages.js');
+                            const { objectTools, objectHandlers } = await import('./tools/objects.js');
+                            const { sectionTools, sectionHandlers } = await import('./tools/sections.js');
+                            const { globalSearchTools, globalSearchHandlers } = await import('./tools/global-search.js');
+
+                            const allTools = [
+                                ...projectTools,
+                                ...stageTools,
+                                ...objectTools,
+                                ...sectionTools,
+                                ...globalSearchTools,
+                            ];
+                            const allHandlers = {
+                                ...projectHandlers,
+                                ...stageHandlers,
+                                ...objectHandlers,
+                                ...sectionHandlers,
+                                ...globalSearchHandlers,
+                            };
+
+                            let result;
+                            if (method === 'initialize') {
+                                // Ответ инициализации по аналогии с MCP
+                                result = {
+                                    protocolVersion: '2025-03-26',
+                                    capabilities: {
+                                        tools: { listChanged: false },
+                                        resources: { subscribe: false, listChanged: false },
+                                        prompts: { listChanged: false },
+                                    },
+                                    serverInfo: { name: 'eneca-mcp', version: '2.0.0' },
+                                };
+                            } else if (method === 'tools/list') {
+                                result = { tools: allTools };
+                            } else if (method === 'tools/call') {
+                                const toolName = params?.name;
+                                const toolArgs = params?.arguments || {};
+                                if (!toolName || !allHandlers[toolName]) {
+                                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                                    res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32601, message: `Инструмент "${toolName}" не найден` } }));
+                                    return;
+                                }
+                                try {
+                                    const handler = allHandlers[toolName];
+                                    const handlerResult = await handler(toolArgs);
+                                    result = handlerResult;
+                                } catch (e) {
+                                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                                    res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32000, message: `Ошибка инструмента: ${e?.message || String(e)}` } }));
+                                    return;
+                                }
+                            } else {
+                                res.writeHead(200, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found' } }));
+                                return;
+                            }
+
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ jsonrpc: '2.0', id, result }));
+                        } catch (parseErr) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'Invalid JSON', message: parseErr?.message || String(parseErr) }));
+                        }
+                    });
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Internal Server Error', message: err?.message || String(err) }));
+                }
+                return;
+            }
             // GET /sse - устанавливаем SSE соединение
             if (req.method === 'GET' && url.pathname === '/sse') {
                 console.log('GET /sse - Новое SSE подключение от n8n');
