@@ -1257,6 +1257,33 @@ export class DatabaseService {
     }
 
     /**
+     * Создать заметку в таблице notions
+     * Обязательные поля: notion_created_by (uuid), notion_content (text)
+     */
+    async createNotion(notionCreatedBy, notionContent) {
+        try {
+            const createdBy = String(notionCreatedBy || '').trim();
+            const content = String(notionContent || '').trim();
+            if (!createdBy || !content) {
+                return { success: false, message: 'notion_created_by и notion_content обязательны' };
+            }
+
+            const { data, error } = await supabase
+                .from('notions')
+                .insert([{ notion_created_by: createdBy, notion_content: content }])
+                .select()
+                .single();
+
+            if (error) {
+                return { success: false, message: `Ошибка создания заметки: ${error.message}`, error: error.message };
+            }
+
+            return { success: true, message: 'Заметка успешно создана', data };
+        } catch (error) {
+            return { success: false, message: `Неожиданная ошибка: ${error}`, error: String(error) };
+        }
+    }
+    /**
      * Получить разделы проекта и email ответственных по имени менеджера и названию проекта
      * Источник: view_project_tree (колонки: manager_name, project_name, section_name, section_responsible_email)
      */

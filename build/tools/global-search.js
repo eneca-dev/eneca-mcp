@@ -147,6 +147,16 @@ export async function handleSearchEmployeeFullInfo(args) {
                                 report += ` (${workload.section_type})`;
                             }
                             report += `\n`;
+                            // Дедлайны по разделу
+                            if (workload.section_end_date) {
+                                report += `   Дедлайн раздела: ${new Date(workload.section_end_date).toLocaleDateString()}\n`;
+                            }
+                            // Декомпозиция: загрузки с дедлайнами (если доступны поля во view)
+                            const decompDeadline = workload.loading_deadline || workload.loading_end_date || workload.due_date || workload.decomposition_deadline;
+                            if (decompDeadline) {
+                                const decompName = workload.loading_name || workload.decomposition_name || workload.task_name || null;
+                                report += `   Декомпозиция${decompName ? ` (${decompName})` : ''}: дедлайн ${new Date(decompDeadline).toLocaleDateString()}\n`;
+                            }
                         }
                     });
                 });
@@ -738,6 +748,44 @@ export async function handleGetProjectSectionsByManagerName(args) {
     }
 }
 
+// ===== СОЗДАНИЕ ЗАМЕТКИ (NOTION) =====
+export const createNotionTool = {
+    name: "create_notion",
+    description: "Создает заметку в таблице notions (notion_created_by: uuid, notion_content: text)",
+    inputSchema: {
+        type: "object",
+        properties: {
+            notion_created_by: {
+                type: "string",
+                description: "UUID пользователя, создавшего заметку"
+            },
+            notion_content: {
+                type: "string",
+                description: "Текст заметки (output модели)"
+            }
+        },
+        required: ["notion_created_by", "notion_content"]
+    }
+};
+
+export async function handleCreateNotion(args) {
+    try {
+        const notionCreatedBy = String(args.notion_created_by || '').trim();
+        const notionContent = String(args.notion_content || '').trim();
+
+        const result = await dbService.createNotion(notionCreatedBy, notionContent);
+        if (!result.success) {
+            return { content: [{ type: "text", text: result.message }] };
+        }
+        const row = result.data;
+        let text = `✅ Заметка создана (ID: ${row?.notion_id || '—'})\n`;
+        text += `Автор: ${row?.notion_created_by || notionCreatedBy}\n`;
+        return { content: [{ type: "text", text }] };
+    } catch (error) {
+        return { content: [{ type: "text", text: `Ошибка создания заметки: ${error}` }] };
+    }
+}
+
 // ===== Итоговый экспорт всех глобальных инструментов и обработчиков =====
 export const globalSearchTools = [
     searchEmployeeFullInfoTool,
@@ -745,7 +793,8 @@ export const globalSearchTools = [
     searchUsersTool,
     getEmployeeWorkloadTool,
     getProjectTeamTool,
-    getProjectSectionsByManagerNameTool
+    getProjectSectionsByManagerNameTool,
+    createNotionTool
 ];
 
 export const globalSearchHandlers = {
@@ -754,6 +803,7 @@ export const globalSearchHandlers = {
     search_users: handleSearchUsers,
     get_employee_workload: handleGetEmployeeWorkload,
     get_project_team: handleGetProjectTeam,
-    get_project_sections_by_manager_name: handleGetProjectSectionsByManagerName
+    get_project_sections_by_manager_name: handleGetProjectSectionsByManagerName,
+    create_notion: handleCreateNotion
 };
 
