@@ -36,6 +36,9 @@ if (transport === 'sse') {
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
             res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id');
+            // Анти-буферизация для прокси (Heroku, Nginx и т.п.) и стабильности SSE
+            res.setHeader('Cache-Control', 'no-cache, no-transform');
+            res.setHeader('X-Accel-Buffering', 'no');
             if (req.method === 'OPTIONS') {
                 res.writeHead(200);
                 res.end();
@@ -50,6 +53,8 @@ if (transport === 'sse') {
                     // Создаем MCP сервер для каждого подключения
                     const server = createMcpServer();
                     // Создаем SSE транспорт
+                    // Доп. защита от буферизации на уровне ответа SSE
+                    res.setHeader('X-Accel-Buffering', 'no');
                     const sseTransport = new SSEServerTransport('/sse', res);
                     const sessionId = sseTransport.sessionId;
                     // Сохраняем транспорт для POST запросов
@@ -60,7 +65,8 @@ if (transport === 'sse') {
                     await server.connect(sseTransport);
                     console.log('SSE соединение установлено');
                     
-                    // Устанавливаем keep-alive ping каждые 30 секунд для предотвращения таймаутов Heroku
+                    // Устанавливаем более частый keep-alive ping (каждые 10 секунд)
+                    // Это помогает избежать разрывов SSE (H27) на стороне прокси
                     const keepAliveInterval = setInterval(() => {
                         if (res.writableEnded || res.destroyed) {
                             clearInterval(keepAliveInterval);
@@ -68,14 +74,14 @@ if (transport === 'sse') {
                         }
                         
                         try {
-                            // Отправляем комментарий каждые 30 секунд для поддержания соединения
+                            // Отправляем комментарий каждые 10 секунд для поддержания соединения
                             res.write(`: keepalive ${Date.now()}\n\n`);
                             console.log('💓 Keep-alive ping отправлен');
                         } catch (error) {
                             console.log('❌ Ошибка keep-alive ping:', error.message);
                             clearInterval(keepAliveInterval);
                         }
-                    }, 30000); // 30 секунд
+                    }, 10000); // 10 секунд
                     
                     // Очищаем интервал при закрытии соединения
                     sseTransport.onclose = () => {

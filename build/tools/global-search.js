@@ -683,12 +683,69 @@ export async function handleGetProjectTeam(args) {
 }
 
 // Экспорт всех глобальных инструментов
+// Экспорт списков перенесен в конец файла, после объявлений всех инструментов
+
+// ===== РАЗДЕЛЫ ПО МЕНЕДЖЕРУ И ПРОЕКТУ =====
+export const getProjectSectionsByManagerNameTool = {
+    name: "get_project_sections_by_manager_name",
+    description: "По имени менеджера и названию проекта выдает все разделы проекта и email ответственных (из view_project_tree)",
+    inputSchema: {
+        type: "object",
+        properties: {
+            manager_name: {
+                type: "string",
+                description: "Имя менеджера проекта (точное совпадение, как в БД)"
+            },
+            project_name: {
+                type: "string",
+                description: "Название проекта (точное совпадение)"
+            }
+        },
+        required: ["manager_name", "project_name"]
+    }
+};
+
+export async function handleGetProjectSectionsByManagerName(args) {
+    try {
+        const managerName = String(args.manager_name || '').trim();
+        const projectName = String(args.project_name || '').trim();
+
+        if (!managerName || !projectName) {
+            return { content: [{ type: "text", text: "Нужно указать manager_name и project_name" }] };
+        }
+
+        const rows = await dbService.getProjectSectionsByManagerName(projectName, managerName);
+
+        if (!rows || rows.length === 0) {
+            return { content: [{ type: "text", text: `Данные не найдены для проекта "${projectName}" и менеджера "${managerName}"` }] };
+        }
+
+        const sorted = [...rows].sort((a, b) => (a.section_name || '').localeCompare(b.section_name || ''));
+
+        let report = `# 📄 Разделы проекта по менеджеру\n`;
+        report += `Проект: ${projectName}\n`;
+        report += `Менеджер: ${managerName}\n`;
+        report += `Найдено разделов: ${sorted.length}\n\n`;
+
+        sorted.forEach((row, idx) => {
+            const email = row.section_responsible_email || 'не указан';
+            report += `${idx + 1}. ${row.section_name} — ${email}\n`;
+        });
+
+        return { content: [{ type: "text", text: report }] };
+    } catch (error) {
+        return { content: [{ type: "text", text: `Ошибка получения разделов по менеджеру: ${error}` }] };
+    }
+}
+
+// ===== Итоговый экспорт всех глобальных инструментов и обработчиков =====
 export const globalSearchTools = [
     searchEmployeeFullInfoTool,
     searchByResponsibleTool,
     searchUsersTool,
     getEmployeeWorkloadTool,
-    getProjectTeamTool
+    getProjectTeamTool,
+    getProjectSectionsByManagerNameTool
 ];
 
 export const globalSearchHandlers = {
@@ -696,5 +753,7 @@ export const globalSearchHandlers = {
     search_by_responsible: handleSearchByResponsible,
     search_users: handleSearchUsers,
     get_employee_workload: handleGetEmployeeWorkload,
-    get_project_team: handleGetProjectTeam
+    get_project_team: handleGetProjectTeam,
+    get_project_sections_by_manager_name: handleGetProjectSectionsByManagerName
 };
+

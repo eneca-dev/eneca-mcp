@@ -1088,6 +1088,57 @@ export class DatabaseService {
     }
 
     /**
+     * Получить все разделы проекта с ответственными и названиями объектов
+     */
+    async getProjectSectionsWithResponsibles(projectId) {
+        try {
+            let query = supabase
+                .from('sections')
+                .select(`
+                    section_id,
+                    section_name,
+                    section_type,
+                    section_description,
+                    section_start_date,
+                    section_end_date,
+                    section_object_id,
+                    section_responsible,
+                    objects!inner(object_name),
+                    profiles_responsible:section_responsible(user_id, first_name, last_name, full_name, email, position_name, department_name)
+                `)
+                .eq('section_project_id', projectId);
+
+            const { data, error } = await query;
+            if (error) return [];
+
+            return (data || []).map((s) => {
+                const responsibleProfile = s.profiles_responsible || null;
+                const fullName = responsibleProfile?.full_name || `${responsibleProfile?.first_name || ''} ${responsibleProfile?.last_name || ''}`.trim();
+                return {
+                    section_id: s.section_id,
+                    section_name: s.section_name,
+                    section_type: s.section_type,
+                    section_description: s.section_description,
+                    section_start_date: s.section_start_date,
+                    section_end_date: s.section_end_date,
+                    object_name: s.objects?.object_name || null,
+                    responsible: responsibleProfile
+                        ? {
+                            user_id: responsibleProfile.user_id,
+                            full_name: fullName,
+                            email: responsibleProfile.email,
+                            position_name: responsibleProfile.position_name,
+                            department_name: responsibleProfile.department_name
+                        }
+                        : null
+                };
+            });
+        } catch (error) {
+            return [];
+        }
+    }
+
+    /**
      * Получить команду проекта
      */
     async getProjectTeam(projectId) {
@@ -1206,6 +1257,28 @@ export class DatabaseService {
     }
 
     /**
+     * Получить разделы проекта и email ответственных по имени менеджера и названию проекта
+     * Источник: view_project_tree (колонки: manager_name, project_name, section_name, section_responsible_email)
+     */
+    async getProjectSectionsByManagerName(projectName, managerName) {
+        try {
+            const cleanProject = String(projectName || '').trim();
+            const cleanManager = String(managerName || '').trim();
+            if (!cleanProject || !cleanManager) return [];
+
+            const { data, error } = await supabase
+                .from('view_project_tree')
+                .select('section_name, section_responsible_email, manager_name, project_name')
+                .eq('project_name', cleanProject)
+                .eq('manager_name', cleanManager);
+
+            if (error) return [];
+            return data || [];
+        } catch (error) {
+            return [];
+        }
+    }
+    /**
      * Получить стадию по ID (с кэшированием)
      */
     async getStage(stageId) {
@@ -1261,6 +1334,42 @@ export class DatabaseService {
             }
             
             return result;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    /**
+     * Получить пользователя из profiles по user_id (без фильтра активности)
+     */
+    async getUserFromProfiles(userId) {
+        try {
+            const { data, error } = await supabase
+                .from('profiles')
+                .select('user_id, first_name, last_name, full_name, email')
+                .eq('user_id', userId)
+                .single();
+            return error ? null : data;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    /**
+     * Получить активного пользователя по email (точное совпадение)
+     */
+    async getUserByEmail(email) {
+        try {
+            const clean = String(email).trim().toLowerCase();
+            if (!clean) return null;
+            const { data, error } = await supabase
+                .from('view_users')
+                .select('*')
+                .eq('email', clean)
+                .eq('is_active', true)
+                .limit(1)
+                .single();
+            return error ? null : data;
         } catch (error) {
             return null;
         }
