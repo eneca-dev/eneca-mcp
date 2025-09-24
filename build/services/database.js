@@ -1317,7 +1317,7 @@ export class DatabaseService {
 
             const { data, error } = await supabase
                 .from('view_project_tree')
-                .select('section_id, section_responsible_email, project_name')
+                .select('section_id, section_name, section_responsible_email, project_name')
                 .eq('project_name', cleanProject);
 
             if (error) return [];

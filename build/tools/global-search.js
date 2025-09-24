@@ -729,7 +729,8 @@ export async function handleGetProjectSectionsByManagerName(args) {
         const items = rows.map(row => ({
             type: "object",
             data: {
-                section_id: row.section_id,
+                section_id: row.section_id || null,
+                section_name: row.section_name || null,
                 section_responsible_email: row.section_responsible_email || null
             }
         }));
