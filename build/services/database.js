@@ -1305,6 +1305,27 @@ export class DatabaseService {
             return [];
         }
     }
+
+    /**
+     * Получить разделы проекта (section_id и email ответственного) только по названию проекта
+     * Источник: view_project_tree (колонки: project_name, section_id, section_responsible_email)
+     */
+    async getProjectSectionsByProjectName(projectName) {
+        try {
+            const cleanProject = String(projectName || '').trim();
+            if (!cleanProject) return [];
+
+            const { data, error } = await supabase
+                .from('view_project_tree')
+                .select('section_id, section_responsible_email, project_name')
+                .eq('project_name', cleanProject);
+
+            if (error) return [];
+            return data || [];
+        } catch (error) {
+            return [];
+        }
+    }
     /**
      * Получить стадию по ID (с кэшированием)
      */

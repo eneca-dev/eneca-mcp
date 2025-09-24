@@ -698,51 +698,43 @@ export async function handleGetProjectTeam(args) {
 // ===== РАЗДЕЛЫ ПО МЕНЕДЖЕРУ И ПРОЕКТУ =====
 export const getProjectSectionsByManagerNameTool = {
     name: "get_project_sections_by_manager_name",
-    description: "По имени менеджера и названию проекта выдает все разделы проекта и email ответственных (из view_project_tree)",
+    description: "По названию проекта возвращает объекты {section_id, section_responsible_email} (из view_project_tree)",
     inputSchema: {
         type: "object",
         properties: {
-            manager_name: {
-                type: "string",
-                description: "Имя менеджера проекта (точное совпадение, как в БД)"
-            },
             project_name: {
                 type: "string",
                 description: "Название проекта (точное совпадение)"
             }
         },
-        required: ["manager_name", "project_name"]
+        required: ["project_name"]
     }
 };
 
 export async function handleGetProjectSectionsByManagerName(args) {
     try {
-        const managerName = String(args.manager_name || '').trim();
         const projectName = String(args.project_name || '').trim();
 
-        if (!managerName || !projectName) {
-            return { content: [{ type: "text", text: "Нужно указать manager_name и project_name" }] };
+        if (!projectName) {
+            return { content: [{ type: "text", text: "Нужно указать project_name" }] };
         }
 
-        const rows = await dbService.getProjectSectionsByManagerName(projectName, managerName);
+        const rows = await dbService.getProjectSectionsByProjectName(projectName);
 
         if (!rows || rows.length === 0) {
-            return { content: [{ type: "text", text: `Данные не найдены для проекта "${projectName}" и менеджера "${managerName}"` }] };
+            return { content: [{ type: "text", text: `Данные не найдены для проекта "${projectName}"` }] };
         }
 
-        const sorted = [...rows].sort((a, b) => (a.section_name || '').localeCompare(b.section_name || ''));
+        // Возвращаем массив объектов (каждый раздел отдельным элементом)
+        const items = rows.map(row => ({
+            type: "object",
+            data: {
+                section_id: row.section_id,
+                section_responsible_email: row.section_responsible_email || null
+            }
+        }));
 
-        let report = `# 📄 Разделы проекта по менеджеру\n`;
-        report += `Проект: ${projectName}\n`;
-        report += `Менеджер: ${managerName}\n`;
-        report += `Найдено разделов: ${sorted.length}\n\n`;
-
-        sorted.forEach((row, idx) => {
-            const email = row.section_responsible_email || 'не указан';
-            report += `${idx + 1}. ${row.section_name} — ${email}\n`;
-        });
-
-        return { content: [{ type: "text", text: report }] };
+        return { content: items };
     } catch (error) {
         return { content: [{ type: "text", text: `Ошибка получения разделов по менеджеру: ${error}` }] };
     }
