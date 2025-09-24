@@ -731,7 +731,7 @@ export async function handleGetProjectSectionsByManagerName(args) {
             data: {
                 section_id: row.section_id || null,
                 section_name: row.section_name || null,
-                section_responsible_email: row.section_responsible_email || null
+                section_responsible_id: row.section_responsible_id || null
             }
         }));
 
