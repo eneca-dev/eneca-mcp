@@ -65,6 +65,7 @@ if (transport === 'sse') {
                             const { objectTools, objectHandlers } = await import('./tools/objects.js');
                             const { sectionTools, sectionHandlers } = await import('./tools/sections.js');
                             const { globalSearchTools, globalSearchHandlers } = await import('./tools/global-search.js');
+                            const { reportTools, reportHandlers } = await import('./tools/reports.js');
 
                             const allTools = [
                                 ...projectTools,
@@ -72,6 +73,7 @@ if (transport === 'sse') {
                                 ...objectTools,
                                 ...sectionTools,
                                 ...globalSearchTools,
+                                ...reportTools,
                             ];
                             const allHandlers = {
                                 ...projectHandlers,
@@ -79,6 +81,7 @@ if (transport === 'sse') {
                                 ...objectHandlers,
                                 ...sectionHandlers,
                                 ...globalSearchHandlers,
+                                ...reportHandlers,
                             };
 
                             let result;

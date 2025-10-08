@@ -12,6 +12,8 @@ import { objectTools, objectHandlers } from './tools/objects.js';
 import { sectionTools, sectionHandlers } from './tools/sections.js';
 // Импорт глобальных инструментов поиска
 import { globalSearchTools, globalSearchHandlers } from './tools/global-search.js';
+// Импорт инструментов отчётов
+import { reportTools, reportHandlers } from './tools/reports.js';
 // Создаем экземпляр сервиса базы данных
 const dbService = new DatabaseService();
 export function createMcpServer() {
@@ -40,7 +42,8 @@ export function createMcpServer() {
         ...stageTools,
         ...objectTools,
         ...sectionTools,
-        ...globalSearchTools
+        ...globalSearchTools,
+        ...reportTools
     ];
     // Объединение всех обработчиков
     const allHandlers = {
@@ -48,7 +51,8 @@ export function createMcpServer() {
         ...stageHandlers,
         ...objectHandlers,
         ...sectionHandlers,
-        ...globalSearchHandlers
+        ...globalSearchHandlers,
+        ...reportHandlers
     };
     console.log(`📦 Загружено инструментов: ${allTools.length}`);
     console.log(`🔧 Загружено обработчиков: ${Object.keys(allHandlers).length}`);
