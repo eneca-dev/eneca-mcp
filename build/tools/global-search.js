@@ -8,7 +8,22 @@ const dbService = new DatabaseService();
 // ===== ГЛОБАЛЬНЫЙ ПОИСК СОТРУДНИКОВ =====
 export const searchEmployeeFullInfoTool = {
     name: "search_employee_full_info",
-    description: "Полный поиск сотрудника с детальной информацией о проектах, разделах и загрузке",
+    description: `Полный поиск сотрудника с детальной информацией для формирования плана на день. Включает:
+    - Основную информацию (должность, отдел, команда)
+    - Проекты (как менеджер и главный инженер)
+    - Активные задачи и загрузку по разделам
+    - События календаря (отпуска, больничные, отгулы)
+    - Задания от других разделов
+    - Разделы со статусом "в работе" и их соответствие загрузке (кейс 3)
+    - Разделы с приближающимися дедлайнами (кейс 4)
+    - Задачи декомпозиции без сроков или с приближающимися сроками <= 3 дней (кейс 5)
+    - Задания (assignments) с устаревшим статусом (не обновлялись 3+ дня) (кейс 7)
+    - Разделы с критической задержкой (кейс 8)
+    - Разделы без комментариев от сотрудника (кейс 9)
+    - Новые задания в разделах со статусами "Передано/Принято/Выполнено" (последние 3 дня) (кейс 10)
+    - Непрочитанные уведомления и объявления (кейс 11)
+
+    Используйте этот инструмент для анализа рабочей нагрузки и формирования задач на день.`,
     inputSchema: {
         type: "object",
         properties: {
@@ -59,11 +74,46 @@ export async function handleSearchEmployeeFullInfo(args) {
 
         const user = users[0];
         
-        // Получаем полную информацию о сотруднике
-        const [workloads, projectsAsManager, projectsAsLeadEngineer] = await Promise.all([
+        // Получаем полную информацию о сотруднике, включая данные для плана на день
+        const [
+            workloads,
+            projectsAsManager,
+            projectsAsLeadEngineer,
+            calendarEvents,
+            assignments,
+            // Новые данные для кейсов плана на день
+            sectionsInProgress,
+            upcomingDeadlines,
+            decompositionTasks,
+            unreadNotifications,
+            staleSections,
+            criticalDelaySections,
+            sectionsWithoutComments,
+            sectionsWithNewTasks
+        ] = await Promise.all([
             dbService.getUserActiveWorkloads(user.user_id),
             dbService.getProjectsByManager(user.user_id),
-            dbService.getProjectsByLeadEngineer(user.user_id)
+            dbService.getProjectsByLeadEngineer(user.user_id),
+            // события календаря: личные или глобальные
+            dbService.getUserCalendarEvents(user.user_id, null, null, 50),
+            // задания, переданные в разделы, где сотрудник ответственный
+            dbService.getAssignmentsForResponsibleSections(user.user_id, 100),
+            // Кейс 3: Разделы в работе
+            dbService.getUserSectionsInProgress(user.user_id, 50),
+            // Кейс 4: Разделы с приближающимися дедлайнами (7 дней)
+            dbService.getUserSectionsWithUpcomingDeadlines(user.user_id, 7, 50),
+            // Кейс 5: Задачи декомпозиции без сроков или с приближающимися сроками (3 дня)
+            dbService.getUserDecompositionTasks(user.user_id, 100),
+            // Кейс 11: Непрочитанные уведомления
+            dbService.getUserUnreadNotifications(user.user_id, 50),
+            // Кейс 7: Разделы с устаревшим статусом (3+ дня)
+            dbService.getUserSectionsWithStaleStatus(user.user_id, 3, 50),
+            // Кейс 8: Разделы с критической задержкой
+            dbService.getUserSectionsWithCriticalDelay(user.user_id, 50),
+            // Кейс 9: Разделы без комментариев от сотрудника
+            dbService.getUserSectionsWithoutComments(user.user_id, 50),
+            // Кейс 10: Новые задания в разделах сотрудника (последние 3 дня, статусы: Передано/Принято/Выполнено)
+            dbService.getUserSectionsWithNewTasks(user.user_id, 3, 50)
         ]);
 
         // Формируем детальный отчет
@@ -111,7 +161,7 @@ export async function handleSearchEmployeeFullInfo(args) {
         // Активные задачи и загрузка
         if (workloads && workloads.length > 0) {
             report += `## 📊 Активные задачи и загрузка (${workloads.length})\n`;
-            
+
             // Группируем по проектам
             const projectGroups = workloads.reduce((groups, workload) => {
                 const projectName = workload.project_name || 'Неизвестный проект';
@@ -124,7 +174,7 @@ export async function handleSearchEmployeeFullInfo(args) {
 
             Object.entries(projectGroups).forEach(([projectName, projectWorkloads]) => {
                 report += `### 🎯 **${projectName}**\n`;
-                
+
                 // Группируем по объектам
                 const objectGroups = projectWorkloads.reduce((groups, workload) => {
                     const objectName = workload.object_name || 'Неизвестный объект';
@@ -141,21 +191,28 @@ export async function handleSearchEmployeeFullInfo(args) {
                         if (workload.section_name) {
                             report += `• **${workload.section_name}**`;
                             if (workload.loading_rate && workload.loading_rate !== '0') {
-                                report += ` - загрузка: ${workload.loading_rate}%`;
+                                const loadingRate = parseFloat(workload.loading_rate);
+                                const hours = loadingRate * 8;
+                                const stavkaWord = loadingRate === 1 ? 'ставка' : 'ставок';
+                                report += ` - загрузка: ${workload.loading_rate} ${stavkaWord} (${hours} часов)`;
                             }
                             if (workload.section_type) {
                                 report += ` (${workload.section_type})`;
                             }
                             report += `\n`;
-                            // Дедлайны по разделу
+
+                            // Дедлайн загрузки (loading_finish)
+                            if (workload.loading_finish) {
+                                report += `   Дедлайн загрузки: ${new Date(workload.loading_finish).toLocaleDateString()}`;
+                                if (workload.loading_start) {
+                                    report += ` (период: ${new Date(workload.loading_start).toLocaleDateString()} - ${new Date(workload.loading_finish).toLocaleDateString()})`;
+                                }
+                                report += `\n`;
+                            }
+
+                            // Дедлайн раздела (если отличается от загрузки)
                             if (workload.section_end_date) {
                                 report += `   Дедлайн раздела: ${new Date(workload.section_end_date).toLocaleDateString()}\n`;
-                            }
-                            // Декомпозиция: загрузки с дедлайнами (если доступны поля во view)
-                            const decompDeadline = workload.loading_deadline || workload.loading_end_date || workload.due_date || workload.decomposition_deadline;
-                            if (decompDeadline) {
-                                const decompName = workload.loading_name || workload.decomposition_name || workload.task_name || null;
-                                report += `   Декомпозиция${decompName ? ` (${decompName})` : ''}: дедлайн ${new Date(decompDeadline).toLocaleDateString()}\n`;
                             }
                         }
                     });
@@ -167,14 +224,316 @@ export async function handleSearchEmployeeFullInfo(args) {
             report += `Нет активных задач\n\n`;
         }
 
+        // События календаря (личные и глобальные)
+        if (calendarEvents && calendarEvents.length > 0) {
+            report += `## 🗓️ События календаря (${calendarEvents.length})\n`;
+            calendarEvents.forEach((ev, index) => {
+                const start = ev.calendar_event_date_start ? new Date(ev.calendar_event_date_start).toLocaleString() : '—';
+                const end = ev.calendar_event_date_end ? new Date(ev.calendar_event_date_end).toLocaleString() : null;
+                report += `${index + 1}. ${ev.calendar_event_type}`;
+                if (ev.calendar_event_is_global) {
+                    report += ` (глобальное)`;
+                }
+                if (ev.calendar_event_comment) {
+                    report += ` — ${ev.calendar_event_comment}`;
+                }
+                report += `\n   Начало: ${start}`;
+                if (end) {
+                    report += `\n   Окончание: ${end}`;
+                }
+                report += `\n`;
+            });
+            report += `\n`;
+        }
+
+        // Задания, переданные в разделы, где сотрудник ответственный
+        if (assignments && assignments.length > 0) {
+            report += `## ✅ Задания по разделам (где сотрудник ответственный) (${assignments.length})\n`;
+            assignments.forEach((a, index) => {
+                const due = a.due_date ? new Date(a.due_date).toLocaleDateString() : '—';
+                const status = a.status || '—';
+                const sectionName = a.section?.section_name || '—';
+                const objectName = a.section?.object_name || null;
+                const projectName = a.section?.project_name || '—';
+                report += `${index + 1}. ${a.title || 'Задание'}\n`;
+                report += `   Статус: ${status}\n`;
+                report += `   Дедлайн: ${due}\n`;
+                report += `   Проект: ${projectName}\n`;
+                if (objectName) {
+                    report += `   Объект: ${objectName}\n`;
+                }
+                if (sectionName) {
+                    report += `   Раздел: ${sectionName}\n`;
+                }
+                if (a.link) {
+                    report += `   Ссылка: ${a.link}\n`;
+                }
+                if (a.description) {
+                    report += `   Описание: ${a.description}\n`;
+                }
+                report += `\n`;
+            });
+        }
+
+
+        // Разделы в работе (Кейс 3)
+        if (sectionsInProgress && sectionsInProgress.length > 0) {
+            report += `## 🔄 Разделы в работе (${sectionsInProgress.length})\n`;
+            const totalLoading = workloads?.reduce((sum, w) => sum + (parseFloat(w.loading_rate) || 0), 0) || 0;
+            const totalHours = Math.round(totalLoading * 8);
+            report += `Общая загрузка: ${totalLoading.toFixed(1)} ставок (${totalHours} ч)\n\n`;
+            
+            sectionsInProgress.slice(0, 10).forEach((section, index) => {
+                report += `${index + 1}. **${section.section_name}** (${section.project_name})\n`;
+                if (section.object_name) {
+                    report += `   Объект: ${section.object_name}\n`;
+                }
+                if (section.section_end_date) {
+                    report += `   Дедлайн: ${new Date(section.section_end_date).toLocaleDateString()}\n`;
+                }
+                if (section.last_status_updated) {
+                    const daysAgo = Math.floor((new Date() - new Date(section.last_status_updated)) / (1000 * 60 * 60 * 24));
+                    report += `   Статус обновлен ${daysAgo} дн. назад\n`;
+                }
+                report += `\n`;
+            });
+            if (sectionsInProgress.length > 10) {
+                report += `... и ещё ${sectionsInProgress.length - 10} разделов\n`;
+            }
+            report += `\n`;
+        }
+
+        // Приближающиеся дедлайны (Кейс 4)
+        if (upcomingDeadlines && upcomingDeadlines.length > 0) {
+            report += `## ⏰ Приближающиеся дедлайны (${upcomingDeadlines.length})\n`;
+            upcomingDeadlines.forEach((section, index) => {
+                report += `${index + 1}. **${section.section_name}** (${section.project_name})\n`;
+                if (section.object_name) {
+                    report += `   Объект: ${section.object_name}\n`;
+                }
+                report += `   Дедлайн: ${new Date(section.section_end_date).toLocaleDateString()} (${section.days_until_deadline} дн.)\n`;
+                if (section.status_name) {
+                    report += `   Статус: ${section.status_name}\n`;
+                }
+                report += `\n`;
+            });
+            report += `\n`;
+        }
+
+        // Задачи декомпозиции (Кейс 5)
+        if (decompositionTasks && decompositionTasks.length > 0) {
+            report += `## 📋 Задачи декомпозиции (${decompositionTasks.length})\n`;
+            
+            // Задачи без дедлайнов
+            const tasksWithoutDeadline = decompositionTasks.filter(t => t.has_no_deadline);
+            if (tasksWithoutDeadline.length > 0) {
+                report += `### ⚠️ Без установленных сроков (${tasksWithoutDeadline.length})\n`;
+                tasksWithoutDeadline.slice(0, 5).forEach((task, index) => {
+                    report += `${index + 1}. ${task.task_description}\n`;
+                    report += `   Раздел: ${task.section_name} (${task.project_name})\n`;
+                    if (task.planned_hours) {
+                        report += `   Планируемые часы: ${task.planned_hours}\n`;
+                    }
+                    if (task.progress) {
+                        report += `   Прогресс: ${task.progress}%\n`;
+                    }
+                    report += `\n`;
+                });
+                if (tasksWithoutDeadline.length > 5) {
+                    report += `... и ещё ${tasksWithoutDeadline.length - 5} задач\n`;
+                }
+            }
+            
+            // Задачи с приближающимися сроками
+            const tasksWithUpcomingDeadline = decompositionTasks.filter(t => !t.has_no_deadline && t.days_until_deadline !== null && t.days_until_deadline <= 7);
+            if (tasksWithUpcomingDeadline.length > 0) {
+                report += `### 🔥 С приближающимися сроками (${tasksWithUpcomingDeadline.length})\n`;
+                tasksWithUpcomingDeadline.slice(0, 5).forEach((task, index) => {
+                    report += `${index + 1}. ${task.task_description}\n`;
+                    report += `   Раздел: ${task.section_name} (${task.project_name})\n`;
+                    report += `   Дедлайн: ${new Date(task.due_date).toLocaleDateString()} (${task.days_until_deadline} дн.)\n`;
+                    if (task.progress) {
+                        report += `   Прогресс: ${task.progress}%\n`;
+                    }
+                    report += `\n`;
+                });
+                if (tasksWithUpcomingDeadline.length > 5) {
+                    report += `... и ещё ${tasksWithUpcomingDeadline.length - 5} задач\n`;
+                }
+            }
+            report += `\n`;
+        }
+
+        // Задания с устаревшим статусом (Кейс 7)
+        if (staleSections && staleSections.length > 0) {
+            report += `## ⚠️ Задания с устаревшим статусом (${staleSections.length})\n`;
+            report += `Статус задания не обновлялся более 3 дней\n\n`;
+            staleSections.slice(0, 10).forEach((assignment, index) => {
+                report += `${index + 1}. Задание: ${assignment.assignment_title || 'Задание'}\n`;
+                if (assignment.assignment_description) {
+                    report += `   Описание: ${assignment.assignment_description}\n`;
+                }
+                report += `   Проект: ${assignment.project_name}\n`;
+                report += `   Раздел: ${assignment.section_name}\n`;
+                if (assignment.object_name) {
+                    report += `   Объект: ${assignment.object_name}\n`;
+                }
+                if (assignment.assignment_status) {
+                    report += `   Статус задания: ${assignment.assignment_status}\n`;
+                }
+                if (assignment.days_since_update !== null) {
+                    report += `   Обновлено ${assignment.days_since_update} дн. назад\n`;
+                } else {
+                    report += `   Задание никогда не обновлялось\n`;
+                }
+                if (assignment.assignment_due_date) {
+                    report += `   Срок: ${new Date(assignment.assignment_due_date).toLocaleDateString()}\n`;
+                }
+                if (assignment.assignment_link) {
+                    report += `   Ссылка: ${assignment.assignment_link}\n`;
+                }
+                report += `\n`;
+            });
+            if (staleSections.length > 10) {
+                report += `... и ещё ${staleSections.length - 10} заданий\n`;
+            }
+            report += `\n`;
+        }
+
+        // Разделы с критической задержкой (Кейс 8)
+        if (criticalDelaySections && criticalDelaySections.length > 0) {
+            report += `## 🚨 Разделы с критической задержкой (${criticalDelaySections.length})\n`;
+            report += `Дедлайн прошел более 3 дней назад\n\n`;
+            criticalDelaySections.forEach((section, index) => {
+                report += `${index + 1}. **${section.section_name}** (${section.project_name})\n`;
+                if (section.object_name) {
+                    report += `   Объект: ${section.object_name}\n`;
+                }
+                report += `   Дедлайн: ${new Date(section.section_end_date).toLocaleDateString()} (просрочен на ${Math.abs(section.days_until_deadline)} дн.)\n`;
+                if (section.status_name) {
+                    report += `   Статус: ${section.status_name}\n`;
+                }
+                report += `\n`;
+            });
+            report += `\n`;
+        }
+
+        // Разделы без комментариев (Кейс 9)
+        if (sectionsWithoutComments && sectionsWithoutComments.length > 0) {
+            report += `## 💬 Разделы без комментариев от сотрудника (${sectionsWithoutComments.length})\n`;
+            report += `Рекомендуется подготовить отчет и оставить комментарий\n\n`;
+            sectionsWithoutComments.slice(0, 10).forEach((section, index) => {
+                report += `${index + 1}. **${section.section_name}** (${section.project_name})\n`;
+                if (section.object_name) {
+                    report += `   Объект: ${section.object_name}\n`;
+                }
+                if (section.status_name) {
+                    report += `   Статус: ${section.status_name}\n`;
+                }
+                if (section.section_end_date) {
+                    report += `   Дедлайн: ${new Date(section.section_end_date).toLocaleDateString()}\n`;
+                }
+                report += `\n`;
+            });
+            if (sectionsWithoutComments.length > 10) {
+                report += `... и ещё ${sectionsWithoutComments.length - 10} разделов\n`;
+            }
+            report += `\n`;
+        }
+
+        // Новые задания в разделах (Кейс 10)
+        if (sectionsWithNewTasks && sectionsWithNewTasks.length > 0) {
+            // Подсчитываем общее количество заданий
+            const totalAssignments = sectionsWithNewTasks.reduce((sum, section) => sum + section.assignments.length, 0);
+
+            report += `## 🆕 Новые задания в разделах (${sectionsWithNewTasks.length} раздела, ${totalAssignments} заданий)\n`;
+            report += `Обновлены за последние 3 дня, статусы: Передано/Принято/Выполнено\n`;
+            report += `Рекомендуется ознакомиться и уточнить их приоритетность\n\n`;
+
+            sectionsWithNewTasks.forEach((section) => {
+                report += `### 📋 **${section.section_name}** (${section.project_name})\n`;
+                if (section.object_name) {
+                    report += `Объект: ${section.object_name}\n`;
+                }
+                report += `Новых заданий: ${section.assignments.length}\n\n`;
+
+                section.assignments.forEach((assignment, index) => {
+                    report += `${index + 1}. **${assignment.title || 'Задание'}**\n`;
+                    report += `   Статус: ${assignment.status}\n`;
+
+                    if (assignment.description) {
+                        const shortDesc = assignment.description.length > 100
+                            ? assignment.description.substring(0, 100) + '...'
+                            : assignment.description;
+                        report += `   Описание: ${shortDesc}\n`;
+                    }
+
+                    if (assignment.from_section_name) {
+                        report += `   От раздела: ${assignment.from_section_name}`;
+                        if (assignment.from_section_responsible) {
+                            report += ` (${assignment.from_section_responsible})`;
+                        }
+                        report += `\n`;
+                    }
+
+                    if (assignment.due_date) {
+                        report += `   Срок выполнения: ${new Date(assignment.due_date).toLocaleDateString()}\n`;
+                    }
+
+                    if (assignment.planned_duration) {
+                        report += `   Плановая длительность: ${assignment.planned_duration} дн.\n`;
+                    }
+
+                    if (assignment.link) {
+                        report += `   Ссылка: ${assignment.link}\n`;
+                    }
+
+                    // Показываем дату обновления
+                    const daysAgo = assignment.days_since_update === 0
+                        ? 'сегодня'
+                        : `${assignment.days_since_update} дн. назад`;
+                    report += `   Обновлено: ${daysAgo}\n`;
+                    report += `\n`;
+                });
+            });
+            report += `\n`;
+        }
+
+        // Непрочитанные уведомления (Кейс 11)
+        if (unreadNotifications && unreadNotifications.length > 0) {
+            report += `## 🔔 Непрочитанные уведомления (${unreadNotifications.length})\n`;
+            unreadNotifications.slice(0, 10).forEach((notif, index) => {
+                report += `${index + 1}. ${notif.rendered_text || 'Уведомление'}\n`;
+                if (notif.entity_type) {
+                    report += `   Тип: ${notif.entity_type}\n`;
+                }
+                report += `   Дата: ${new Date(notif.created_at).toLocaleDateString()}\n`;
+                report += `\n`;
+            });
+            if (unreadNotifications.length > 10) {
+                report += `... и ещё ${unreadNotifications.length - 10} уведомлений\n`;
+            }
+            report += `\n`;
+        }
+
         // Статистика
         const totalProjects = (projectsAsManager?.length || 0) + (projectsAsLeadEngineer?.length || 0);
         const totalSections = workloads?.length || 0;
-        
+        const totalLoadingRate = workloads?.reduce((sum, w) => sum + (parseFloat(w.loading_rate) || 0), 0) || 0;
+        const totalLoadingHours = Math.round(totalLoadingRate * 8);
+
+        // Подсчитываем общее количество новых заданий
+        const totalNewAssignments = sectionsWithNewTasks?.reduce((sum, section) => sum + section.assignments.length, 0) || 0;
+
         report += `## 📈 Статистика\n`;
         report += `• **Всего проектов:** ${totalProjects}\n`;
         report += `• **Активных разделов:** ${totalSections}\n`;
-        report += `• **Общая загрузка:** ${workloads?.reduce((sum, w) => sum + (parseFloat(w.loading_rate) || 0), 0).toFixed(1)}%\n`;
+        report += `• **Общая загрузка:** ${totalLoadingRate.toFixed(1)} ставок (${totalLoadingHours} ч)\n`;
+        report += `• **Приближающихся дедлайнов:** ${upcomingDeadlines?.length || 0}\n`;
+        report += `• **Задач декомпозиции:** ${decompositionTasks?.length || 0}\n`;
+        report += `• **Разделов без комментариев:** ${sectionsWithoutComments?.length || 0}\n`;
+        report += `• **Новых заданий в разделах:** ${totalNewAssignments}\n`;
+        report += `• **Непрочитанных уведомлений:** ${unreadNotifications?.length || 0}\n`;
 
         return {
             content: [{
@@ -386,7 +745,7 @@ export async function handleSearchUsers(args) {
                                 text += ` (${workload.object_name})`;
                             }
                             if (workload.loading_rate && workload.loading_rate !== '0') {
-                                text += ` - загрузка: ${workload.loading_rate}%`;
+                                text += ` - загрузка: ${workload.loading_rate}`;
                             }
                             text += `\n`;
                         }
@@ -494,14 +853,15 @@ export async function handleGetEmployeeWorkload(args) {
 
         // Статистика
         const totalSections = workloadData.projects.reduce((sum, p) => sum + p.sections.length, 0);
-        const totalWorkload = workloadData.projects.reduce((sum, p) => 
+        const totalWorkload = workloadData.projects.reduce((sum, p) =>
             sum + p.sections.reduce((sSum, s) => sSum + (parseFloat(s.loading_rate) || 0), 0), 0
         );
+        const totalWorkloadHours = Math.round(totalWorkload * 8);
 
         report += `## 📈 Общая статистика\n`;
         report += `• **Активных проектов:** ${workloadData.projects.length}\n`;
         report += `• **Всего разделов:** ${totalSections}\n`;
-        report += `• **Общая загрузка:** ${totalWorkload.toFixed(1)}%\n\n`;
+        report += `• **Общая загрузка:** ${totalWorkload.toFixed(1)} ставок (${totalWorkloadHours} ч)\n\n`;
 
         // Детализация по проектам
         report += `## 🎯 Детализация по проектам\n\n`;
@@ -516,7 +876,7 @@ export async function handleGetEmployeeWorkload(args) {
             }
 
             report += `• Активных разделов: ${project.sections.length}\n`;
-            report += `• Загрузка по проекту: ${project.sections.reduce((sum, s) => sum + (parseFloat(s.loading_rate) || 0), 0).toFixed(1)}%\n\n`;
+            report += `• Загрузка по проекту: ${project.sections.reduce((sum, s) => sum + (parseFloat(s.loading_rate) || 0), 0).toFixed(1)}\n\n`;
 
             // Группируем по объектам
             const objectGroups = project.sections.reduce((groups, section) => {
@@ -536,7 +896,7 @@ export async function handleGetEmployeeWorkload(args) {
                         report += ` (${section.section_type})`;
                     }
                     if (section.loading_rate && section.loading_rate !== '0') {
-                        report += ` - загрузка: ${section.loading_rate}%`;
+                        report += ` - загрузка: ${section.loading_rate}`;
                     }
                     if (section.section_start_date) {
                         report += `\n  Начало: ${new Date(section.section_start_date).toLocaleDateString()}`;
