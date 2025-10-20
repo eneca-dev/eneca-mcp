@@ -1257,6 +1257,104 @@ export class DatabaseService {
     }
 
     /**
+     * Получить события календаря пользователя и глобальные события
+     */
+    async getUserCalendarEvents(userId, fromDate = null, toDate = null, limit = 20) {
+        try {
+            // Берем только актуальные события: те, что еще не завершились на сегодня,
+            // или начинаются сегодня/позже. Для этого используем нижнюю границу effectiveFrom.
+            const effectiveFromIso = (() => {
+                if (fromDate) {
+                    try {
+                        const d = new Date(fromDate);
+                        return d.toISOString();
+                    } catch (_) {
+                        // игнорируем неверный формат и fallback на сегодня
+                    }
+                }
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                return today.toISOString();
+            })();
+
+            let query = supabase
+                .from('calendar_events')
+                .select('*')
+                .or(`calendar_event_is_global.eq.true,calendar_event_created_by.eq.${userId}`);
+
+            // Условие актуальности:
+            // 1) однодневные/с неуказанным окончанием: start >= effectiveFrom
+            // 2) многодневные: end >= effectiveFrom
+            query = query.or(`and(calendar_event_date_end.is.null,calendar_event_date_start.gte.${effectiveFromIso}),calendar_event_date_end.gte.${effectiveFromIso}`);
+
+            if (toDate) {
+                query = query.lte('calendar_event_date_start', toDate);
+            }
+
+            const { data, error } = await query
+                .order('calendar_event_date_start', { ascending: true })
+                .limit(limit);
+
+            return error ? [] : data || [];
+        } catch (error) {
+            return [];
+        }
+    }
+
+    /**
+     * Получить задания (assignments), переданные в разделы, где пользователь является ответственным
+     */
+    async getAssignmentsForResponsibleSections(userId, limit = 50) {
+        try {
+            // Находим разделы, где пользователь ответственный, вместе с проектом и объектом
+            const { data: sections, error: sectionsError } = await supabase
+                .from('sections')
+                .select(`
+                    section_id,
+                    section_name,
+                    section_project_id,
+                    section_object_id,
+                    projects:section_project_id(project_name),
+                    objects:section_object_id(object_name)
+                `)
+                .eq('section_responsible', userId);
+
+            if (sectionsError || !sections || sections.length === 0) {
+                return [];
+            }
+
+            const sectionIds = sections.map(s => s.section_id);
+            const sectionById = new Map();
+            sections.forEach(s => {
+                sectionById.set(s.section_id, {
+                    section_id: s.section_id,
+                    section_name: s.section_name,
+                    project_name: s.projects?.project_name || null,
+                    object_name: s.objects?.object_name || null
+                });
+            });
+
+            const { data: assignments, error: assignmentsError } = await supabase
+                .from('assignments')
+                .select('*')
+                .in('to_section_id', sectionIds)
+                .order('due_date', { ascending: true })
+                .limit(limit);
+
+            if (assignmentsError || !assignments) {
+                return [];
+            }
+
+            return assignments.map(a => ({
+                ...a,
+                section: sectionById.get(a.to_section_id) || null
+            }));
+        } catch (error) {
+            return [];
+        }
+    }
+
+    /**
      * Создать заметку в таблице notions
      * Обязательные поля: notion_created_by (uuid), notion_content (text)
      */
@@ -1439,6 +1537,531 @@ export class DatabaseService {
             return { success: true, message: 'Объект найден', data };
         } catch (error) {
             return { success: false, message: `Неожиданная ошибка: ${error}`, error: String(error) };
+        }
+    }
+
+    // ===== МЕТОДЫ ДЛЯ ПЛАНА НА ДЕНЬ =====
+
+
+    /**
+     * Получить разделы со статусом "в работе" для сотрудника
+     * Кейс 3: Разделы со статусом в работе
+     */
+    async getUserSectionsInProgress(userId, limit = 50) {
+        try {
+            const { data, error } = await supabase
+                .from('sections')
+                .select(`
+                    section_id,
+                    section_name,
+                    section_type,
+                    section_start_date,
+                    section_end_date,
+                    section_status_id,
+                    last_status_updated,
+                    last_responsible_updated,
+                    section_statuses!inner(name, color),
+                    objects!inner(object_name),
+                    projects!inner(project_name)
+                `)
+                .eq('section_responsible', userId)
+                .eq('section_statuses.name', 'В работе')
+                .order('section_updated', { ascending: false })
+                .limit(limit);
+
+            if (error) {
+                console.error('Ошибка получения разделов в работе:', error);
+                return [];
+            }
+
+            return (data || []).map(section => ({
+                section_id: section.section_id,
+                section_name: section.section_name,
+                section_type: section.section_type,
+                section_start_date: section.section_start_date,
+                section_end_date: section.section_end_date,
+                status_name: section.section_statuses?.name,
+                status_color: section.section_statuses?.color,
+                last_status_updated: section.last_status_updated,
+                last_responsible_updated: section.last_responsible_updated,
+                object_name: section.objects?.object_name,
+                project_name: section.projects?.project_name
+            }));
+        } catch (error) {
+            console.error('Ошибка получения разделов в работе:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Получить разделы с приближающимися дедлайнами
+     * Кейс 4: Разделы с приближающимися дедлайнами
+     */
+    async getUserSectionsWithUpcomingDeadlines(userId, daysThreshold = 7, limit = 50) {
+        try {
+            const futureDate = new Date();
+            futureDate.setDate(futureDate.getDate() + daysThreshold);
+
+            const { data, error } = await supabase
+                .from('sections')
+                .select(`
+                    section_id,
+                    section_name,
+                    section_type,
+                    section_start_date,
+                    section_end_date,
+                    section_status_id,
+                    section_statuses(name, color),
+                    objects!inner(object_name),
+                    projects!inner(project_name)
+                `)
+                .eq('section_responsible', userId)
+                .not('section_end_date', 'is', null)
+                .lte('section_end_date', futureDate.toISOString())
+                .gte('section_end_date', new Date().toISOString())
+                .order('section_end_date', { ascending: true })
+                .limit(limit);
+
+            if (error) {
+                console.error('Ошибка получения разделов с дедлайнами:', error);
+                return [];
+            }
+
+            return (data || []).map(section => ({
+                section_id: section.section_id,
+                section_name: section.section_name,
+                section_type: section.section_type,
+                section_start_date: section.section_start_date,
+                section_end_date: section.section_end_date,
+                status_name: section.section_statuses?.name,
+                status_color: section.section_statuses?.color,
+                object_name: section.objects?.object_name,
+                project_name: section.projects?.project_name,
+                days_until_deadline: Math.ceil((new Date(section.section_end_date) - new Date()) / (1000 * 60 * 60 * 24))
+            }));
+        } catch (error) {
+            console.error('Ошибка получения разделов с дедлайнами:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Получить активные задачи декомпозиции для сотрудника
+     * Кейс 5: Задачи декомпозиции без установленных сроков или с приближающимися сроками (3 дня или меньше)
+     */
+    async getUserDecompositionTasks(userId, limit = 100) {
+        try {
+            // Вычисляем дату через 3 дня
+            const threeDaysFromNow = new Date();
+            threeDaysFromNow.setDate(threeDaysFromNow.getDate() + 3);
+            threeDaysFromNow.setHours(23, 59, 59, 999);
+
+            const { data, error } = await supabase
+                .from('decomposition_items')
+                .select(`
+                    decomposition_item_id,
+                    decomposition_item_description,
+                    decomposition_item_planned_hours,
+                    decomposition_item_planned_due_date,
+                    decomposition_item_order,
+                    decomposition_item_progress,
+                    decomposition_item_created_at,
+                    decomposition_item_updated_at,
+                    decomposition_item_status_id,
+                    section_statuses(name, color),
+                    work_categories(work_category_name),
+                    decomposition_stages(
+                        decomposition_stage_name,
+                        decomposition_stage_start,
+                        decomposition_stage_finish
+                    ),
+                    sections!inner(
+                        section_id,
+                        section_name,
+                        section_type,
+                        section_end_date,
+                        objects(object_name),
+                        projects(project_name)
+                    )
+                `)
+                .eq('decomposition_item_responsible', userId)
+                // Фильтруем задачи: срок не указан ИЛИ срок подходит (осталось 3 дня или меньше)
+                .or(`decomposition_item_planned_due_date.is.null,decomposition_item_planned_due_date.lte.${threeDaysFromNow.toISOString()}`)
+                .order('decomposition_item_planned_due_date', { ascending: true, nullsFirst: false })
+                .limit(limit);
+
+            if (error) {
+                console.error('Ошибка получения задач декомпозиции:', error);
+                return [];
+            }
+
+            return (data || []).map(item => ({
+                task_id: item.decomposition_item_id,
+                task_description: item.decomposition_item_description,
+                planned_hours: item.decomposition_item_planned_hours,
+                due_date: item.decomposition_item_planned_due_date,
+                progress: item.decomposition_item_progress,
+                status_name: item.section_statuses?.name,
+                status_color: item.section_statuses?.color,
+                work_category: item.work_categories?.work_category_name,
+                stage_name: item.decomposition_stages?.decomposition_stage_name,
+                stage_start: item.decomposition_stages?.decomposition_stage_start,
+                stage_finish: item.decomposition_stages?.decomposition_stage_finish,
+                section_name: item.sections?.section_name,
+                section_type: item.sections?.section_type,
+                section_end_date: item.sections?.section_end_date,
+                object_name: item.sections?.objects?.object_name,
+                project_name: item.sections?.projects?.project_name,
+                has_no_deadline: !item.decomposition_item_planned_due_date,
+                days_until_deadline: item.decomposition_item_planned_due_date
+                    ? Math.ceil((new Date(item.decomposition_item_planned_due_date) - new Date()) / (1000 * 60 * 60 * 24))
+                    : null
+            }));
+        } catch (error) {
+            console.error('Ошибка получения задач декомпозиции:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Получить непрочитанные уведомления для сотрудника
+     * Кейс 11: Непрочитанные уведомления/объявления
+     */
+    async getUserUnreadNotifications(userId, limit = 50) {
+        try {
+            const { data, error } = await supabase
+                .from('user_notifications')
+                .select(`
+                    id,
+                    is_read,
+                    is_archived,
+                    created_at,
+                    notifications!inner(
+                        id,
+                        rendered_text,
+                        payload,
+                        created_at,
+                        entity_types(entity_name)
+                    )
+                `)
+                .eq('user_id', userId)
+                .eq('is_read', false)
+                .eq('is_archived', false)
+                .order('created_at', { ascending: false })
+                .limit(limit);
+
+            if (error) {
+                console.error('Ошибка получения непрочитанных уведомлений:', error);
+                return [];
+            }
+
+            return (data || []).map(notif => ({
+                notification_id: notif.id,
+                rendered_text: notif.notifications?.rendered_text,
+                entity_type: notif.notifications?.entity_types?.entity_name,
+                payload: notif.notifications?.payload,
+                created_at: notif.created_at,
+                notification_created_at: notif.notifications?.created_at
+            }));
+        } catch (error) {
+            console.error('Ошибка получения непрочитанных уведомлений:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Получить задания (assignments), где статус не обновлялся несколько дней
+     * Кейс 7: Если ответственный не обновлял статус задания в течение нескольких дней
+     */
+    async getUserSectionsWithStaleStatus(userId, daysThreshold = 3, limit = 50) {
+        try {
+            const thresholdDate = new Date();
+            thresholdDate.setDate(thresholdDate.getDate() - daysThreshold);
+
+            // Получаем задания (assignments) в разделы, где пользователь ответственный
+            const { data, error } = await supabase
+                .from('assignments')
+                .select(`
+                    assignment_id,
+                    title,
+                    description,
+                    status,
+                    due_date,
+                    link,
+                    created_at,
+                    updated_at,
+                    to_section:to_section_id!inner(
+                        section_id,
+                        section_name,
+                        section_type,
+                        section_responsible,
+                        objects(object_name),
+                        projects(project_name, project_id)
+                    )
+                `)
+                .eq('to_section.section_responsible', userId)
+                .or(`updated_at.is.null,updated_at.lt.${thresholdDate.toISOString()}`)
+                .order('updated_at', { ascending: true, nullsFirst: true })
+                .limit(limit);
+
+            if (error) {
+                console.error('Ошибка получения заданий с устаревшим статусом:', error);
+                return [];
+            }
+
+            return (data || []).map(assignment => ({
+                assignment_id: assignment.assignment_id,
+                assignment_title: assignment.title,
+                assignment_description: assignment.description,
+                assignment_status: assignment.status,
+                assignment_due_date: assignment.due_date,
+                assignment_link: assignment.link,
+                assignment_created_at: assignment.created_at,
+                assignment_updated_at: assignment.updated_at,
+                section_id: assignment.to_section?.section_id,
+                section_name: assignment.to_section?.section_name,
+                section_type: assignment.to_section?.section_type,
+                object_name: assignment.to_section?.objects?.object_name,
+                project_name: assignment.to_section?.projects?.project_name,
+                project_id: assignment.to_section?.projects?.project_id,
+                days_since_update: assignment.updated_at
+                    ? Math.floor((new Date() - new Date(assignment.updated_at)) / (1000 * 60 * 60 * 24))
+                    : null
+            }));
+        } catch (error) {
+            console.error('Ошибка получения заданий с устаревшим статусом:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Получить разделы с критической задержкой
+     * Кейс 8: Разделы с критической задержкой (дедлайн прошел более 3 дней назад)
+     */
+    async getUserSectionsWithCriticalDelay(userId, limit = 50) {
+        try {
+            const now = new Date();
+            const criticalThreshold = new Date();
+            criticalThreshold.setDate(criticalThreshold.getDate() - 3); // Более 3 дней назад
+
+            const { data, error } = await supabase
+                .from('sections')
+                .select(`
+                    section_id,
+                    section_name,
+                    section_type,
+                    section_start_date,
+                    section_end_date,
+                    section_status_id,
+                    last_status_updated,
+                    section_statuses(name, color),
+                    objects!inner(object_name),
+                    projects!inner(project_name)
+                `)
+                .eq('section_responsible', userId)
+                .not('section_end_date', 'is', null)
+                .lt('section_end_date', criticalThreshold.toISOString())
+                .order('section_end_date', { ascending: true })
+                .limit(limit);
+
+            if (error) {
+                console.error('Ошибка получения разделов с критической задержкой:', error);
+                return [];
+            }
+
+            return (data || []).map(section => {
+                const daysUntilDeadline = Math.ceil((new Date(section.section_end_date) - now) / (1000 * 60 * 60 * 24));
+                return {
+                    section_id: section.section_id,
+                    section_name: section.section_name,
+                    section_type: section.section_type,
+                    section_start_date: section.section_start_date,
+                    section_end_date: section.section_end_date,
+                    status_name: section.section_statuses?.name,
+                    status_color: section.section_statuses?.color,
+                    last_status_updated: section.last_status_updated,
+                    object_name: section.objects?.object_name,
+                    project_name: section.projects?.project_name,
+                    days_until_deadline: daysUntilDeadline,
+                    is_overdue: daysUntilDeadline < 0
+                };
+            });
+        } catch (error) {
+            console.error('Ошибка получения разделов с критической задержкой:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Получить разделы где сотрудник работал, но не оставил комментариев
+     * Кейс 9: Подготовить отчет по выполненным задачам для проекта и отправить комментарии в раздел
+     */
+    async getUserSectionsWithoutComments(userId, limit = 50) {
+        try {
+            // Получаем все разделы где сотрудник ответственный
+            const { data: sections, error: sectionsError } = await supabase
+                .from('sections')
+                .select(`
+                    section_id,
+                    section_name,
+                    section_type,
+                    section_start_date,
+                    section_end_date,
+                    section_status_id,
+                    section_statuses(name, color),
+                    objects!inner(object_name),
+                    projects!inner(project_name, project_id)
+                `)
+                .eq('section_responsible', userId)
+                .limit(limit);
+
+            if (sectionsError || !sections) {
+                console.error('Ошибка получения разделов:', sectionsError);
+                return [];
+            }
+
+            // Получаем комментарии сотрудника для этих разделов
+            const sectionIds = sections.map(s => s.section_id);
+
+            const { data: comments, error: commentsError } = await supabase
+                .from('section_comments')
+                .select('section_id')
+                .eq('author_id', userId)
+                .in('section_id', sectionIds);
+
+            if (commentsError) {
+                console.error('Ошибка получения комментариев:', commentsError);
+                return [];
+            }
+
+            // Создаем Set для быстрого поиска разделов с комментариями
+            const sectionsWithComments = new Set((comments || []).map(c => c.section_id));
+
+            // Фильтруем разделы без комментариев
+            const sectionsWithoutComments = sections.filter(section =>
+                !sectionsWithComments.has(section.section_id)
+            );
+
+            return sectionsWithoutComments.map(section => ({
+                section_id: section.section_id,
+                section_name: section.section_name,
+                section_type: section.section_type,
+                section_start_date: section.section_start_date,
+                section_end_date: section.section_end_date,
+                status_name: section.section_statuses?.name,
+                status_color: section.section_statuses?.color,
+                object_name: section.objects?.object_name,
+                project_name: section.projects?.project_name,
+                project_id: section.projects?.project_id
+            }));
+        } catch (error) {
+            console.error('Ошибка получения разделов без комментариев:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Получить новые задания (assignments) в разделах сотрудника со статусами "Передано", "Принято", "Выполнено"
+     * Кейс 10: Ознакомиться с новыми заданиями в разделе и уточнить их приоритетность
+     */
+    async getUserSectionsWithNewTasks(userId, daysThreshold = 3, limit = 50) {
+        try {
+            // Вычисляем дату для фильтрации (по умолчанию - последние 3 дня)
+            const now = new Date();
+            const startDate = new Date(now.getTime() - daysThreshold * 24 * 60 * 60 * 1000);
+
+            // Формат: "YYYY-MM-DD 00:00:00" для корректного сравнения timestamp
+            const year = startDate.getFullYear();
+            const month = String(startDate.getMonth() + 1).padStart(2, '0');
+            const day = String(startDate.getDate()).padStart(2, '0');
+            const startDateStr = `${year}-${month}-${day} 00:00:00`;
+
+            const { data, error } = await supabase
+                .from('assignments')
+                .select(`
+                    assignment_id,
+                    title,
+                    description,
+                    status,
+                    due_date,
+                    link,
+                    created_at,
+                    updated_at,
+                    planned_transmitted_date,
+                    planned_duration,
+                    actual_transmitted_date,
+                    actual_accepted_date,
+                    actual_worked_out_date,
+                    from_section:from_section_id(
+                        section_id,
+                        section_name,
+                        section_responsible,
+                        profiles:section_responsible(user_id, first_name, last_name, email)
+                    ),
+                    to_section:to_section_id!inner(
+                        section_id,
+                        section_name,
+                        section_type,
+                        section_responsible,
+                        objects(object_name),
+                        projects(project_name, project_id)
+                    )
+                `)
+                .eq('to_section.section_responsible', userId)
+                .in('status', ['Передано', 'Принято', 'Выполнено'])
+                .gte('updated_at', startDateStr)
+                .order('updated_at', { ascending: false })
+                .limit(limit);
+
+            if (error) {
+                console.error('[getUserSectionsWithNewTasks] Ошибка получения новых заданий:', error);
+                return [];
+            }
+
+            // Группируем задания по разделам
+            const sectionGroups = {};
+
+            (data || []).forEach(item => {
+                const sectionId = item.to_section?.section_id;
+                if (!sectionId) return;
+
+                if (!sectionGroups[sectionId]) {
+                    sectionGroups[sectionId] = {
+                        section_id: sectionId,
+                        section_name: item.to_section?.section_name,
+                        section_type: item.to_section?.section_type,
+                        object_name: item.to_section?.objects?.object_name,
+                        project_name: item.to_section?.projects?.project_name,
+                        project_id: item.to_section?.projects?.project_id,
+                        assignments: []
+                    };
+                }
+
+                sectionGroups[sectionId].assignments.push({
+                    assignment_id: item.assignment_id,
+                    title: item.title,
+                    description: item.description,
+                    status: item.status,
+                    due_date: item.due_date,
+                    link: item.link,
+                    created_at: item.created_at,
+                    updated_at: item.updated_at,
+                    planned_transmitted_date: item.planned_transmitted_date,
+                    planned_duration: item.planned_duration,
+                    actual_transmitted_date: item.actual_transmitted_date,
+                    actual_accepted_date: item.actual_accepted_date,
+                    actual_worked_out_date: item.actual_worked_out_date,
+                    from_section_name: item.from_section?.section_name,
+                    from_section_responsible: `${item.from_section?.profiles?.first_name || ''} ${item.from_section?.profiles?.last_name || ''}`.trim(),
+                    days_since_update: Math.floor((new Date() - new Date(item.updated_at)) / (1000 * 60 * 60 * 24))
+                });
+            });
+
+            // Возвращаем массив разделов с их заданиями
+            return Object.values(sectionGroups);
+        } catch (error) {
+            console.error('Ошибка получения новых заданий:', error);
+            return [];
         }
     }
 }
